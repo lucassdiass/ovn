@@ -288,10 +288,10 @@ static const char *reg_ct_state[] = {
  * Route offsets implement logic to prioritize traffic for routes with
  * same ip_prefix values:
  *  -  connected route overrides static one;
- *  -  static route overrides connected route. */
-#define ROUTE_PRIO_OFFSET_MULTIPLIER 3
-#define ROUTE_PRIO_OFFSET_STATIC 1
-#define ROUTE_PRIO_OFFSET_CONNECTED 2
+ *  -  static route overrides src-ip route. */
+#define ROUTE_PRIO_OFFSET_MULTIPLIER 5
+#define ROUTE_PRIO_OFFSET_STATIC 2
+#define ROUTE_PRIO_OFFSET_CONNECTED 4
 
 /* Returns the type of the datapath to which a flow with the given 'stage' may
  * be added. */
@@ -10636,6 +10636,7 @@ struct ecmp_groups_node {
     uint32_t route_table_id;
     uint16_t route_count;
     struct ovs_list route_list; /* Contains ecmp_route_list_node */
+    struct sset selection_fields;
 };
 
 static void
@@ -10651,6 +10652,14 @@ ecmp_groups_add_route(struct ecmp_groups_node *group,
     struct ecmp_route_list_node *er = xmalloc(sizeof *er);
     er->route = route;
     er->id = ++group->route_count;
+
+    if (group->route_count == 1) {
+        sset_clone(&group->selection_fields, &route->ecmp_selection_fields);
+    } else {
+        sset_intersect(&group->selection_fields,
+                       &route->ecmp_selection_fields);
+    }
+
     ovs_list_insert(&group->route_list, &er->list_node);
 }
 
@@ -10673,6 +10682,7 @@ ecmp_groups_add(struct hmap *ecmp_groups,
     eg->is_src_route = route->is_src_route;
     eg->origin = smap_get_def(&route->route->options, "origin", "");
     eg->route_table_id = route->route_table_id;
+    sset_init(&eg->selection_fields);
     ovs_list_init(&eg->route_list);
     ecmp_groups_add_route(eg, route);
 
@@ -10705,6 +10715,7 @@ ecmp_groups_destroy(struct hmap *ecmp_groups)
             free(er);
         }
         hmap_remove(ecmp_groups, &eg->hmap_node);
+        sset_destroy(&eg->selection_fields);
         free(eg);
     }
     hmap_destroy(ecmp_groups);
@@ -10775,7 +10786,8 @@ build_route_prefix_s(const struct in6_addr *prefix, unsigned int plen)
 static void
 build_route_match(const struct ovn_port *op_inport, uint32_t rtb_id,
                   const char *network_s, int plen, bool is_src_route,
-                  bool is_ipv4, struct ds *match, uint16_t *priority, int ofs)
+                  bool is_ipv4, struct ds *match, uint16_t *priority, int ofs,
+                  bool has_protocol_match)
 {
     const char *dir;
     /* The priority here is calculated to implement longest-prefix-match
@@ -10787,14 +10799,18 @@ build_route_match(const struct ovn_port *op_inport, uint32_t rtb_id,
         dir = "dst";
     }
 
-    *priority = (plen * ROUTE_PRIO_OFFSET_MULTIPLIER) + ofs;
-
     if (op_inport) {
         ds_put_format(match, "inport == %s && ", op_inport->json_key);
     }
     if (rtb_id || ofs == ROUTE_PRIO_OFFSET_STATIC) {
         ds_put_format(match, "%s == %d && ", REG_ROUTE_TABLE_ID, rtb_id);
     }
+
+    if (has_protocol_match) {
+        ofs += 1;
+    }
+    *priority = (plen * ROUTE_PRIO_OFFSET_MULTIPLIER) + ofs;
+
     ds_put_format(match, "ip%s.%s == %s/%d", is_ipv4 ? "4" : "6", dir,
                   network_s, plen);
 }
@@ -10978,7 +10994,7 @@ static void
 build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
                       bool ct_masked_mark, const struct hmap *lr_ports,
                       struct ecmp_groups_node *eg,
-                      struct lflow_ref *lflow_ref)
+                      struct lflow_ref *lflow_ref, const char *protocol)
 
 {
     bool is_ipv4 = IN6_IS_ADDR_V4MAPPED(&eg->prefix);
@@ -10990,7 +11006,8 @@ build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
     int ofs = !strcmp(eg->origin, ROUTE_ORIGIN_CONNECTED) ?
         ROUTE_PRIO_OFFSET_CONNECTED: ROUTE_PRIO_OFFSET_STATIC;
     build_route_match(NULL, eg->route_table_id, prefix_s, eg->plen,
-                      eg->is_src_route, is_ipv4, &route_match, &priority, ofs);
+                      eg->is_src_route, is_ipv4, &route_match, &priority, ofs,
+                      protocol != NULL);
     free(prefix_s);
 
     struct ds actions = DS_EMPTY_INITIALIZER;
@@ -10998,18 +11015,46 @@ build_ecmp_route_flow(struct lflow_table *lflows, struct ovn_datapath *od,
                   "; %s = ", REG_ECMP_GROUP_ID, eg->id, REG_ECMP_MEMBER_ID);
 
     if (!ovs_list_is_singleton(&eg->route_list)) {
+        if (protocol && !sset_is_empty(&eg->selection_fields)) {
+            ds_put_format(&route_match, " && %s", protocol);
+        }
+
+        struct ds values = DS_EMPTY_INITIALIZER;
         bool is_first = true;
 
-        ds_put_cstr(&actions, "select(");
         LIST_FOR_EACH (er, list_node, &eg->route_list) {
             if (is_first) {
                 is_first = false;
             } else {
-                ds_put_cstr(&actions, ", ");
+                ds_put_cstr(&values, ", ");
             }
-            ds_put_format(&actions, "%"PRIu16, er->id);
+            ds_put_format(&values, "%"PRIu16, er->id);
+        }
+
+        if (!sset_is_empty(&eg->selection_fields)) {
+            struct sset field_set = SSET_INITIALIZER(&field_set);
+            sset_clone(&field_set, &eg->selection_fields);
+
+            /* If tp_src and tp_dst is specified in selection_fields, replace it
+             * with protocol specific src and dst port fields */
+            if (sset_find_and_delete(&field_set, "tp_src") && protocol) {
+                sset_add_and_free(&field_set, xasprintf("%s_src", protocol));
+            }
+            if (sset_find_and_delete(&field_set, "tp_dst") && protocol) {
+                sset_add_and_free(&field_set, xasprintf("%s_dst", protocol));
+            }
+
+            char *hash_fields = sset_join(&field_set, ",", "");
+            ds_put_format(&actions, "select(values=(%s); hash_fields=\"%s\"",
+                          ds_cstr(&values), hash_fields);
+
+            free(hash_fields);
+            sset_destroy(&field_set);
+        } else {
+            ds_put_format(&actions, "select(%s", ds_cstr(&values));
         }
         ds_put_cstr(&actions, ");");
+        ds_destroy(&values);
     } else {
         er = CONTAINER_OF(ovs_list_front(&eg->route_list),
                           struct ecmp_route_list_node, list_node);
@@ -11092,7 +11137,7 @@ add_route(struct lflow_table *lflows, struct ovn_datapath *od,
         }
     }
     build_route_match(op_inport, rtb_id, network_s, plen, is_src_route,
-                      is_ipv4, &match, &priority, ofs);
+                      is_ipv4, &match, &priority, ofs, false);
 
     struct ds common_actions = DS_EMPTY_INITIALIZER;
     struct ds actions = DS_EMPTY_INITIALIZER;
@@ -13201,7 +13246,20 @@ build_static_route_flows_for_lrouter(
         /* add a flow in IP_ROUTING, and one flow for each member in
          * IP_ROUTING_ECMP. */
         build_ecmp_route_flow(lflows, od, features->ct_no_masked_label,
-                              lr_ports, group, lflow_ref);
+                              lr_ports, group, lflow_ref, NULL);
+
+        /* If src or dst port is specified for selection_fields, install
+         * separate ECMP flows with protocol match of TCP, UDP and SCTP */
+        if (sset_contains(&group->selection_fields, "tp_src") ||
+            sset_contains(&group->selection_fields, "tp_dst")) {
+            build_ecmp_route_flow(lflows, od, features->ct_no_masked_label,
+                                  lr_ports, group, lflow_ref, "tcp");
+            build_ecmp_route_flow(lflows, od, features->ct_no_masked_label,
+                                  lr_ports, group, lflow_ref, "udp");
+            build_ecmp_route_flow(lflows, od, lr_ports, group, lflow_ref,
+                                  "sctp");
+
+        }
     }
     const struct unique_routes_node *ur;
     HMAP_FOR_EACH (ur, hmap_node, &unique_routes) {
