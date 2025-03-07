@@ -33,12 +33,14 @@
 #include "seq.h"
 #include "socket-util.h"
 #include "statctrl.h"
+#include "stopwatch.h"
 
 VLOG_DEFINE_THIS_MODULE(statctrl);
 
 enum stat_type {
     STATS_MAC_BINDING = 0,
     STATS_FDB,
+    STATS_MAC_BINDING_PROBE,
     STATS_MAX,
 };
 
@@ -62,22 +64,31 @@ struct stats_node {
                                struct ofputil_flow_stats *ofp_stats);
     /* Function to process the parsed stats.
      * This function runs in main thread locked behind mutex. */
-    void (*run)(struct ovs_list *stats_list, uint64_t *req_delay, void *data);
+    void (*run)(struct rconn *swconn,
+                struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                struct ovs_list *stats_list,
+                uint64_t *req_delay, void *data);
+    /* Name of the stats node corresponding stopwatch. */
+    const char *stopwatch_name;
 };
 
 #define STATS_NODE(NAME, REQUEST, DESTROY, PROCESS, RUN)                   \
-    statctrl_ctx.nodes[STATS_##NAME] = (struct stats_node) {               \
-        .request = REQUEST,                                                \
-        .xid = 0,                                                          \
-        .next_request_timestamp = INT64_MAX,                               \
-        .request_delay = 0,                                                \
-        .stats_list =                                                      \
-            OVS_LIST_INITIALIZER(                                          \
-                &statctrl_ctx.nodes[STATS_##NAME].stats_list),             \
-        .destroy = DESTROY,                                                \
-        .process_flow_stats = PROCESS,                                     \
-        .run = RUN                                                         \
-    };
+    do {                                                                   \
+        statctrl_ctx.nodes[STATS_##NAME] = (struct stats_node) {           \
+            .request = REQUEST,                                            \
+            .xid = 0,                                                      \
+            .next_request_timestamp = INT64_MAX,                           \
+            .request_delay = 0,                                            \
+            .stats_list =                                                  \
+                OVS_LIST_INITIALIZER(                                      \
+                    &statctrl_ctx.nodes[STATS_##NAME].stats_list),         \
+            .destroy = DESTROY,                                            \
+            .process_flow_stats = PROCESS,                                 \
+            .run = RUN,                                                    \
+            .stopwatch_name = OVS_STRINGIZE(stats_##NAME),                 \
+        };                                                                 \
+        stopwatch_create(OVS_STRINGIZE(stats_##NAME), SW_MS);              \
+    } while (0)
 
 struct statctrl_ctx {
     /* OpenFlow connection to the switch. */
@@ -145,6 +156,18 @@ statctrl_init(void)
     STATS_NODE(FDB, fdb_request, mac_cache_stats_destroy,
                fdb_stats_process_flow_stats, fdb_stats_run);
 
+    struct ofputil_flow_stats_request mac_binding_probe_request = {
+            .cookie = htonll(0),
+            .cookie_mask = htonll(0),
+            .out_port = OFPP_ANY,
+            .out_group = OFPG_ANY,
+            .table_id = OFTABLE_MAC_BINDING,
+    };
+    STATS_NODE(MAC_BINDING_PROBE, mac_binding_probe_request,
+               mac_cache_stats_destroy,
+               mac_binding_probe_stats_process_flow_stats,
+               mac_binding_probe_stats_run);
+
     statctrl_ctx.thread = ovs_thread_create("ovn_statctrl",
                                             statctrl_thread_handler,
                                             &statctrl_ctx);
@@ -152,13 +175,18 @@ statctrl_init(void)
 
 void
 statctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
+             struct ovsdb_idl_index *sbrec_port_binding_by_name,
              struct mac_cache_data *mac_cache_data)
 {
     if (!ovnsb_idl_txn) {
         return;
     }
 
-    void *node_data[STATS_MAX] = {mac_cache_data, mac_cache_data};
+    void *node_data[STATS_MAX] = {
+        mac_cache_data,
+        mac_cache_data,
+        mac_cache_data
+    };
 
     bool schedule_updated = false;
     long long now = time_msec();
@@ -168,7 +196,11 @@ statctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
         struct stats_node *node = &statctrl_ctx.nodes[i];
         uint64_t prev_delay = node->request_delay;
 
-        node->run(&node->stats_list, &node->request_delay, node_data[i]);
+        stopwatch_start(node->stopwatch_name, time_msec());
+        node->run(statctrl_ctx.swconn,
+                  sbrec_port_binding_by_name, &node->stats_list,
+                  &node->request_delay, node_data[i]);
+        stopwatch_stop(node->stopwatch_name, time_msec());
 
         schedule_updated |=
                 statctrl_update_next_request_timestamp(node, now, prev_delay);

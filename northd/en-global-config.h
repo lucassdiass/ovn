@@ -21,6 +21,7 @@ struct chassis_features {
     bool ct_commit_to_zone;
     bool sample_with_reg;
     bool ct_next_zone;
+    bool ct_label_flush;
 };
 
 struct global_config_tracked_data {
@@ -59,6 +60,8 @@ void en_global_config_clear_tracked_data(void *data);
 bool global_config_nb_global_handler(struct engine_node *, void *data);
 bool global_config_sb_global_handler(struct engine_node *, void *data);
 bool global_config_sb_chassis_handler(struct engine_node *, void *data);
+bool global_config_nb_logical_switch_handler(struct engine_node *node,
+                                             void *data);
 
 /* generic global config handler for any engine node which has global_config
  * has an input node . */

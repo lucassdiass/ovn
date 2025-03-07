@@ -181,18 +181,20 @@ az_run(struct ic_context *ctx)
 }
 
 static uint32_t
-allocate_ts_dp_key(struct hmap *dp_tnlids)
+allocate_ts_dp_key(struct hmap *dp_tnlids, bool vxlan_mode)
 {
-    static uint32_t hint = OVN_MIN_DP_KEY_GLOBAL;
-    return ovn_allocate_tnlid(dp_tnlids, "transit switch datapath",
-                              OVN_MIN_DP_KEY_GLOBAL, OVN_MAX_DP_KEY_GLOBAL,
-                              &hint);
+    uint32_t hint = vxlan_mode ? OVN_MIN_DP_VXLAN_KEY_GLOBAL
+                               : OVN_MIN_DP_KEY_GLOBAL;
+    return ovn_allocate_tnlid(dp_tnlids, "transit switch datapath", hint,
+            vxlan_mode ? OVN_MAX_DP_VXLAN_KEY_GLOBAL : OVN_MAX_DP_KEY_GLOBAL,
+            &hint);
 }
 
 static void
 ts_run(struct ic_context *ctx)
 {
     const struct icnbrec_transit_switch *ts;
+    bool dp_key_refresh = false;
 
     struct hmap dp_tnlids = HMAP_INITIALIZER(&dp_tnlids);
     struct shash isb_dps = SHASH_INITIALIZER(&isb_dps);
@@ -200,6 +202,20 @@ ts_run(struct ic_context *ctx)
     ICSBREC_DATAPATH_BINDING_FOR_EACH (isb_dp, ctx->ovnisb_idl) {
         shash_add(&isb_dps, isb_dp->transit_switch, isb_dp);
         ovn_add_tnlid(&dp_tnlids, isb_dp->tunnel_key);
+    }
+
+    bool vxlan_mode = false;
+    const struct icnbrec_ic_nb_global *ic_nb =
+        icnbrec_ic_nb_global_first(ctx->ovninb_idl);
+
+    if (ic_nb && smap_get_bool(&ic_nb->options, "vxlan_mode", false)) {
+        const struct icsbrec_encap *encap;
+        ICSBREC_ENCAP_FOR_EACH (encap, ctx->ovnisb_idl) {
+            if (!strcmp(encap->type, "vxlan")) {
+                vxlan_mode = true;
+                break;
+            }
+        }
     }
 
     /* Sync INB TS to AZ NB */
@@ -224,7 +240,19 @@ ts_run(struct ic_context *ctx)
                 nbrec_logical_switch_update_other_config_setkey(ls,
                                                                 "interconn-ts",
                                                                 ts->name);
+                nbrec_logical_switch_update_other_config_setkey(
+                        ls, "ic-vxlan_mode", vxlan_mode ? "true" : "false");
+            } else {
+                bool _vxlan_mode = smap_get_bool(&ls->other_config,
+                                                 "ic-vxlan_mode", false);
+                if (_vxlan_mode != vxlan_mode) {
+                    dp_key_refresh = true;
+                    nbrec_logical_switch_update_other_config_setkey(
+                            ls, "ic-vxlan_mode",
+                            vxlan_mode ? "true" : "false");
+                }
             }
+
             isb_dp = shash_find_data(&isb_dps, ts->name);
             if (isb_dp) {
                 int64_t nb_tnl_key = smap_get_int(&ls->other_config,
@@ -260,7 +288,7 @@ ts_run(struct ic_context *ctx)
             isb_dp = shash_find_and_delete(&isb_dps, ts->name);
             if (!isb_dp) {
                 /* Allocate tunnel key */
-                int64_t dp_key = allocate_ts_dp_key(&dp_tnlids);
+                int64_t dp_key = allocate_ts_dp_key(&dp_tnlids, vxlan_mode);
                 if (!dp_key) {
                     continue;
                 }
@@ -268,6 +296,12 @@ ts_run(struct ic_context *ctx)
                 isb_dp = icsbrec_datapath_binding_insert(ctx->ovnisb_txn);
                 icsbrec_datapath_binding_set_transit_switch(isb_dp, ts->name);
                 icsbrec_datapath_binding_set_tunnel_key(isb_dp, dp_key);
+            } else if (dp_key_refresh) {
+                /* Refresh tunnel key since encap mode has changhed. */
+                int64_t dp_key = allocate_ts_dp_key(&dp_tnlids, vxlan_mode);
+                if (dp_key) {
+                    icsbrec_datapath_binding_set_tunnel_key(isb_dp, dp_key);
+                }
             }
         }
 
@@ -503,10 +537,32 @@ find_crp_for_sb_pb(struct ic_context *ctx,
     return find_crp_from_lrp(ctx, peer);
 }
 
-static const char *
-get_lrp_address_for_sb_pb(struct ic_context *ctx,
-                          const struct sbrec_port_binding *sb_pb)
+static const struct nbrec_logical_switch_port *
+get_lsp_by_ts_port_name(struct ic_context *ctx, const char *ts_port_name)
 {
+    const struct nbrec_logical_switch_port *lsp, *key;
+
+    key = nbrec_logical_switch_port_index_init_row(ctx->nbrec_port_by_name);
+    nbrec_logical_switch_port_index_set_name(key, ts_port_name);
+    lsp = nbrec_logical_switch_port_index_find(ctx->nbrec_port_by_name, key);
+    nbrec_logical_switch_port_index_destroy_row(key);
+
+    return lsp;
+}
+
+static const char *
+get_lp_address_for_sb_pb(struct ic_context *ctx,
+                         const struct sbrec_port_binding *sb_pb)
+{
+    const struct nbrec_logical_switch_port *nb_lsp;
+
+    nb_lsp = get_lsp_by_ts_port_name(ctx, sb_pb->logical_port);
+    if (!strcmp(nb_lsp->type, "switch")) {
+        /* Switches always have implicit "unknown" address, and IC-SB port
+         * binding can only have one address specified. */
+        return "unknown";
+    }
+
     const struct sbrec_port_binding *peer = find_peer_port(ctx, sb_pb);
     if (!peer) {
         return NULL;
@@ -597,9 +653,9 @@ sync_local_port(struct ic_context *ctx,
                 const struct nbrec_logical_switch_port *lsp)
 {
     /* Sync address from NB to ISB */
-    const char *address = get_lrp_address_for_sb_pb(ctx, sb_pb);
+    const char *address = get_lp_address_for_sb_pb(ctx, sb_pb);
     if (!address) {
-        VLOG_DBG("Can't get logical router port address for logical"
+        VLOG_DBG("Can't get router/switch port address for logical"
                  " switch port %s", sb_pb->logical_port);
         if (isb_pb->address[0]) {
             icsbrec_port_binding_set_address(isb_pb, "");
@@ -615,6 +671,10 @@ sync_local_port(struct ic_context *ctx,
     if (crp && crp->chassis) {
         if (strcmp(crp->chassis->name, isb_pb->gateway)) {
             icsbrec_port_binding_set_gateway(isb_pb, crp->chassis->name);
+        }
+    } else if (!strcmp(lsp->type, "switch") && sb_pb->chassis) {
+        if (strcmp(sb_pb->chassis->name, isb_pb->gateway)) {
+            icsbrec_port_binding_set_gateway(isb_pb, sb_pb->chassis->name);
         }
     } else {
         if (isb_pb->gateway[0]) {
@@ -715,7 +775,7 @@ create_isb_pb(struct ic_context *ctx,
     icsbrec_port_binding_set_logical_port(isb_pb, sb_pb->logical_port);
     icsbrec_port_binding_set_tunnel_key(isb_pb, pb_tnl_key);
 
-    const char *address = get_lrp_address_for_sb_pb(ctx, sb_pb);
+    const char *address = get_lp_address_for_sb_pb(ctx, sb_pb);
     if (address) {
         icsbrec_port_binding_set_address(isb_pb, address);
     }
@@ -804,7 +864,8 @@ port_binding_run(struct ic_context *ctx,
         for (int i = 0; i < ls->n_ports; i++) {
             lsp = ls->ports[i];
 
-            if (!strcmp(lsp->type, "router")) {
+            if (!strcmp(lsp->type, "router")
+                || !strcmp(lsp->type, "switch")) {
                 /* The port is local. */
                 sb_pb = find_lsp_in_sb(ctx, lsp);
                 if (!sb_pb) {
@@ -1009,27 +1070,6 @@ get_nexthop_from_lport_addresses(bool is_v4,
 }
 
 static bool
-prefix_is_link_local(struct in6_addr *prefix, unsigned int plen)
-{
-    if (IN6_IS_ADDR_V4MAPPED(prefix)) {
-        /* Link local range is "169.254.0.0/16". */
-        if (plen < 16) {
-            return false;
-        }
-        ovs_be32 lla;
-        inet_pton(AF_INET, "169.254.0.0", &lla);
-        return ((in6_addr_get_mapped_ipv4(prefix) & htonl(0xffff0000)) == lla);
-    }
-
-    /* ipv6, link local range is "fe80::/10". */
-    if (plen < 10) {
-        return false;
-    }
-    return (((prefix->s6_addr[0] & 0xff) == 0xfe) &&
-            ((prefix->s6_addr[1] & 0xc0) == 0x80));
-}
-
-static bool
 prefix_is_deny_listed(const struct smap *nb_options,
                       struct in6_addr *prefix,
                       unsigned int plen)
@@ -1072,13 +1112,10 @@ prefix_is_deny_listed(const struct smap *nb_options,
                 continue;
             }
         } else {
-            struct in6_addr mask = ipv6_create_mask(plen);
-            /* First calculate the difference between bl_prefix and prefix, so
-             * use the bl mask to ensure prefixes are correctly validated.
-             * e.g.: 2005:1734:5678::/50 is a subnet of 2005:1234::/21 */
-            struct in6_addr m_prefixes = ipv6_addr_bitand(prefix, &bl_prefix);
-            struct in6_addr m_prefix = ipv6_addr_bitand(&m_prefixes, &mask);
-            struct in6_addr m_bl_prefix = ipv6_addr_bitand(&bl_prefix, &mask);
+            struct in6_addr bl_mask = ipv6_create_mask(bl_plen);
+            struct in6_addr m_prefix = ipv6_addr_bitand(prefix, &bl_mask);
+            struct in6_addr m_bl_prefix = ipv6_addr_bitand(&bl_prefix,
+                                                           &bl_mask);
             if (!ipv6_addr_equals(&m_prefix, &m_bl_prefix)) {
                 continue;
             }
@@ -1128,6 +1165,8 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
                  const struct nbrec_logical_router *nb_lr,
                  const char *route_tag)
 {
+    ovs_assert(nb_route || nb_lrp);
+
     if (route_table == NULL) {
         route_table = "";
     }
@@ -1149,9 +1188,15 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
         hmap_insert(routes_ad, &ic_route->node, hash);
     } else {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-        VLOG_WARN_RL(&rl, "Duplicate route advertisement was suppressed! NB "
-                     "route uuid: "UUID_FMT,
-                     UUID_ARGS(&nb_route->header_.uuid));
+        const char *msg_fmt = "Duplicate %s route advertisement was "
+                              "suppressed! NB %s uuid: "UUID_FMT;
+        if (nb_route) {
+            VLOG_WARN_RL(&rl, msg_fmt, origin, "route",
+                         UUID_ARGS(&nb_route->header_.uuid));
+        } else {
+            VLOG_WARN_RL(&rl, msg_fmt, origin, "lrp",
+                         UUID_ARGS(&nb_lrp->header_.uuid));
+        }
     }
 }
 
@@ -1306,13 +1351,8 @@ static const char *
 get_lrp_name_by_ts_port_name(struct ic_context *ctx, const char *ts_port_name)
 {
     const struct nbrec_logical_switch_port *nb_lsp;
-    const struct nbrec_logical_switch_port *nb_lsp_key =
-        nbrec_logical_switch_port_index_init_row(ctx->nbrec_port_by_name);
-    nbrec_logical_switch_port_index_set_name(nb_lsp_key, ts_port_name);
-    nb_lsp = nbrec_logical_switch_port_index_find(ctx->nbrec_port_by_name,
-                                                  nb_lsp_key);
-    nbrec_logical_switch_port_index_destroy_row(nb_lsp_key);
 
+    nb_lsp = get_lsp_by_ts_port_name(ctx, ts_port_name);
     if (!nb_lsp) {
         return NULL;
     }
@@ -1773,6 +1813,16 @@ route_run(struct ic_context *ctx,
     ICSBREC_PORT_BINDING_FOR_EACH_EQUAL (isb_pb, isb_pb_key,
                                          ctx->icsbrec_port_binding_by_az)
     {
+        const struct nbrec_logical_switch_port *nb_lsp;
+
+        nb_lsp = get_lsp_by_ts_port_name(ctx, isb_pb->logical_port);
+        if (!strcmp(nb_lsp->type, "switch")) {
+            VLOG_DBG("IC-SB Port_Binding '%s' on ts '%s' corresponds to a "
+                     "switch port, not considering for route collection.",
+                     isb_pb->logical_port, isb_pb->transit_switch);
+            continue;
+        }
+
         const char *ts_lrp_name =
             get_lrp_name_by_ts_port_name(ctx, isb_pb->logical_port);
         if (!ts_lrp_name) {
@@ -1922,8 +1972,8 @@ static void
 ovn_db_run(struct ic_context *ctx,
            const struct icsbrec_availability_zone *az)
 {
-    ts_run(ctx);
     gateway_run(ctx, az);
+    ts_run(ctx);
     port_binding_run(ctx, az);
     route_run(ctx, az);
 }

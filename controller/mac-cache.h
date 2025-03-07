@@ -48,11 +48,13 @@ struct mac_cache_threshold {
     uint64_t value;
     /* Statistics dump period. */
     uint64_t dump_period;
+    /* How long to wait between two database updates. */
+    uint64_t cooldown_period;
 };
 
 struct mac_binding_data {
     /* Keys. */
-    const struct sbrec_mac_binding *sbrec; /* Only the UUID is used as key.*/
+    uint64_t cookie;
     uint32_t port_key;
     uint32_t dp_key;
     struct in6_addr ip;
@@ -64,6 +66,8 @@ struct mac_binding {
     struct hmap_node hmap_node;
     /* Common data to identify MAC binding. */
     struct mac_binding_data data;
+    /* Reference to the SB MAC binding record (Might be NULL). */
+    const struct sbrec_mac_binding *sbrec;
     /* User specified timestamp (in ms) */
     long long timestamp;
 };
@@ -134,7 +138,7 @@ mac_binding_data_init(struct mac_binding_data *data,
                       struct in6_addr ip, struct eth_addr mac)
 {
     *data = (struct mac_binding_data) {
-        .sbrec = NULL,
+        .cookie = 0,
         .dp_key = (dp_key),
         .port_key = (port_key),
         .ip = (ip),
@@ -143,7 +147,7 @@ mac_binding_data_init(struct mac_binding_data *data,
 }
 
 void mac_binding_add(struct hmap *map, struct mac_binding_data mb_data,
-                     long long timestamp);
+                     const struct sbrec_mac_binding *, long long timestamp);
 
 void mac_binding_remove(struct hmap *map, struct mac_binding *mb);
 
@@ -159,12 +163,6 @@ bool mac_binding_data_from_sbrec(struct mac_binding_data *data,
 void mac_bindings_clear(struct hmap *map);
 void mac_bindings_to_string(const struct hmap *map, struct ds *out_data);
 
-bool sb_mac_binding_updated(const struct sbrec_mac_binding *mb);
-
-const struct sbrec_mac_binding *
-mac_binding_lookup(struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip,
-                   const char *logical_port, const char *ip);
-
 /* FDB. */
 struct fdb *fdb_add(struct hmap *map, struct fdb_data fdb_data,
                     long long timestamp);
@@ -175,8 +173,6 @@ bool fdb_data_from_sbrec(struct fdb_data *data, const struct sbrec_fdb *fdb);
 
 struct fdb *fdb_find(const struct hmap *map, const struct fdb_data *fdb_data);
 
-bool sb_fdb_updated(const struct sbrec_fdb *fdb);
-
 void fdbs_clear(struct hmap *map);
 
 /* MAC binding stat processing. */
@@ -184,15 +180,19 @@ void
 mac_binding_stats_process_flow_stats(struct ovs_list *stats_list,
                                      struct ofputil_flow_stats *ofp_stats);
 
-void mac_binding_stats_run(struct ovs_list *stats_list, uint64_t *req_delay,
-                           void *data);
+void mac_binding_stats_run(
+        struct rconn *swconn OVS_UNUSED,
+        struct ovsdb_idl_index *sbrec_port_binding_by_name OVS_UNUSED,
+        struct ovs_list *stats_list, uint64_t *req_delay, void *data);
 
 /* FDB stat processing. */
 void fdb_stats_process_flow_stats(struct ovs_list *stats_list,
                                   struct ofputil_flow_stats *ofp_stats);
 
-void fdb_stats_run(struct ovs_list *stats_list, uint64_t *req_delay,
-                   void *data);
+void fdb_stats_run(
+        struct rconn *swconn OVS_UNUSED,
+        struct ovsdb_idl_index *sbrec_port_binding_by_name OVS_UNUSED,
+        struct ovs_list *stats_list, uint64_t *req_delay, void *data);
 
 void mac_cache_stats_destroy(struct ovs_list *stats_list);
 
@@ -224,5 +224,14 @@ void buffered_packets_ctx_destroy(struct buffered_packets_ctx *ctx);
 bool buffered_packets_ctx_is_ready_to_send(struct buffered_packets_ctx *ctx);
 
 bool buffered_packets_ctx_has_packets(struct buffered_packets_ctx *ctx);
+
+void mac_binding_probe_stats_process_flow_stats(
+        struct ovs_list *stats_list,
+        struct ofputil_flow_stats *ofp_stats);
+
+void mac_binding_probe_stats_run(
+        struct rconn *swconn,
+        struct ovsdb_idl_index *sbrec_port_binding_by_name,
+        struct ovs_list *stats_list, uint64_t *req_delay, void *data);
 
 #endif /* controller/mac-cache.h */

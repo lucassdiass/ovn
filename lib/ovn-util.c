@@ -610,6 +610,7 @@ static const char *OVN_NB_LSP_TYPES[] = {
     "localnet",
     "localport",
     "router",
+    "switch",
     "vtep",
     "external",
     "virtual",
@@ -819,6 +820,16 @@ normalize_v46_prefix(const struct in6_addr *prefix, unsigned int plen)
         return normalize_ipv4_prefix(in6_addr_get_mapped_ipv4(prefix), plen);
     } else {
         return normalize_ipv6_prefix(prefix, plen);
+    }
+}
+
+char *
+normalize_v46(const struct in6_addr *prefix)
+{
+    if (IN6_IS_ADDR_V4MAPPED(prefix)) {
+        return normalize_ipv4_prefix(in6_addr_get_mapped_ipv4(prefix), 32);
+    } else {
+        return normalize_ipv6_prefix(prefix, 128);
     }
 }
 
@@ -1246,6 +1257,7 @@ is_pb_router_type(const struct sbrec_port_binding *pb)
     case LP_CHASSISREDIRECT:
     case LP_L3GATEWAY:
     case LP_L2GATEWAY:
+    case LP_REMOTE:
         return true;
 
     case LP_VIF:
@@ -1253,7 +1265,6 @@ is_pb_router_type(const struct sbrec_port_binding *pb)
     case LP_VIRTUAL:
     case LP_LOCALNET:
     case LP_LOCALPORT:
-    case LP_REMOTE:
     case LP_VTEP:
     case LP_EXTERNAL:
     case LP_UNKNOWN:
@@ -1350,4 +1361,41 @@ ovn_update_swconn_at(struct rconn *swconn, const char *target,
     }
 
     return notify;
+}
+
+bool
+prefix_is_link_local(const struct in6_addr *prefix, unsigned int plen)
+{
+    if (IN6_IS_ADDR_V4MAPPED(prefix)) {
+        /* Link local range is "169.254.0.0/16". */
+        if (plen < 16) {
+            return false;
+        }
+        ovs_be32 lla;
+        inet_pton(AF_INET, "169.254.0.0", &lla);
+        return ((in6_addr_get_mapped_ipv4(prefix) & htonl(0xffff0000)) == lla);
+    }
+
+    /* ipv6, link local range is "fe80::/10". */
+    if (plen < 10) {
+        return false;
+    }
+    return (((prefix->s6_addr[0] & 0xff) == 0xfe) &&
+            ((prefix->s6_addr[1] & 0xc0) == 0x80));
+}
+
+const struct sbrec_port_binding *
+lport_lookup_by_name(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                     const char *name)
+{
+    struct sbrec_port_binding *pb = sbrec_port_binding_index_init_row(
+        sbrec_port_binding_by_name);
+    sbrec_port_binding_index_set_logical_port(pb, name);
+
+    const struct sbrec_port_binding *retval = sbrec_port_binding_index_find(
+        sbrec_port_binding_by_name, pb);
+
+    sbrec_port_binding_index_destroy_row(pb);
+
+    return retval;
 }

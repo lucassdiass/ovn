@@ -1968,7 +1968,7 @@ is_paused_nested_action(enum action_opcode opcode)
     case ACTION_OPCODE_HANDLE_SVC_CHECK:
     case ACTION_OPCODE_BFD_MSG:
     case ACTION_OPCODE_ACTIVATION_STRATEGY_RARP:
-    case ACTION_OPCODE_MG_SPLIT_BUF:
+    case ACTION_OPCODE_SPLIT_BUF_ACTION:
     case ACTION_OPCODE_DHCP_RELAY_REQ_CHK:
     case ACTION_OPCODE_DHCP_RELAY_RESP_CHK:
     default:
@@ -2235,7 +2235,7 @@ encode_GET_ND(const struct ovnact_get_mac_bind *get_mac,
               const struct ovnact_encode_params *ep,
               struct ofpbuf *ofpacts)
 {
-    encode_get_mac(get_mac, MFF_XXREG0, ep, ofpacts);
+    encode_get_mac(get_mac, MFF_XXREG1, ep, ofpacts);
 }
 
 static void
@@ -2494,7 +2494,7 @@ encode_LOOKUP_ND_IP(const struct ovnact_lookup_mac_bind_ip *lookup_mac,
                     const struct ovnact_encode_params *ep,
                     struct ofpbuf *ofpacts)
 {
-    encode_lookup_mac_bind_ip(lookup_mac, MFF_XXREG0, ep, ofpacts);
+    encode_lookup_mac_bind_ip(lookup_mac, MFF_XXREG1, ep, ofpacts);
 }
 
 static void
@@ -5371,11 +5371,10 @@ encode_COMMIT_LB_AFF(const struct ovnact_commit_lb_aff *lb_aff,
         imm_backend_ip = (union mf_value) {
             .ipv6 =  lb_aff->backend,
         };
-        if (ep->is_switch) {
-            ol_spec->dst.field = mf_from_id(MFF_LOG_LB_AFF_MATCH_LS_IP6_ADDR);
-        } else {
-            ol_spec->dst.field = mf_from_id(MFF_LOG_LB_AFF_MATCH_LR_IP6_ADDR);
-        }
+        enum mf_field_id id = !ep->register_consolidation && ep->is_switch
+            ? MFF_LOG_LB_AFF_MATCH_LS_IP6_ADDR_OLD
+            : MFF_LOG_LB_AFF_MATCH_IP6_ADDR;
+        ol_spec->dst.field = mf_from_id(id);
     } else {
         ovs_be32 ip4 = in6_addr_get_mapped_ipv4(&lb_aff->backend);
         imm_backend_ip = (union mf_value) {
@@ -5403,7 +5402,10 @@ encode_COMMIT_LB_AFF(const struct ovnact_commit_lb_aff *lb_aff,
             .be16 = htons(lb_aff->backend_port),
         };
 
-        ol_spec->dst.field = mf_from_id(MFF_LOG_LB_AFF_MATCH_PORT);
+        enum mf_field_id id = !ep->register_consolidation
+            ? MFF_LOG_LB_AFF_MATCH_PORT_OLD
+            : MFF_LOG_LB_AFF_MATCH_PORT;
+        ol_spec->dst.field = mf_from_id(id);
         ol_spec->dst_type = NX_LEARN_DST_LOAD;
         ol_spec->src_type = NX_LEARN_SRC_IMMEDIATE;
         ol_spec->dst.ofs = 0;
@@ -5529,6 +5531,21 @@ format_CT_ORIG_TP_DST(const struct ovnact_result *res, struct ds *s)
 {
     expr_field_format(&res->dst, s);
     ds_put_cstr(s, " = ct_tp_dst();");
+}
+
+static void
+format_FLOOD_REMOTE(const struct ovnact_null *null OVS_UNUSED, struct ds *s)
+{
+    ds_put_cstr(s, "flood_remote;");
+}
+
+static void
+encode_FLOOD_REMOTE(const struct ovnact_null *null OVS_UNUSED,
+                    const struct ovnact_encode_params *ep,
+                     struct ofpbuf *ofpacts)
+{
+    put_load(CHASSIS_FLOOD_INDEX_START, MFF_REG6, 0, 32, ofpacts);
+    emit_resubmit(ofpacts, ep->flood_remote_table);
 }
 
 /* Parses an assignment or exchange or put_dhcp_opts action. */
@@ -5758,6 +5775,8 @@ parse_action(struct action_context *ctx)
         parse_sample(ctx);
     } else if (lexer_match_id(ctx->lexer, "mac_cache_use")) {
         ovnact_put_MAC_CACHE_USE(ctx->ovnacts);
+    } else if (lexer_match_id(ctx->lexer, "flood_remote")) {
+        ovnact_put_FLOOD_REMOTE(ctx->ovnacts);
     } else {
         lexer_syntax_error(ctx->lexer, "expecting action");
     }
@@ -5963,33 +5982,6 @@ char *
 ovnact_op_to_string(uint32_t ovnact_opc)
 {
     switch (ovnact_opc) {
-#define ACTION_OPCODES                              \
-        ACTION_OPCODE(ARP)                          \
-        ACTION_OPCODE(IGMP)                         \
-        ACTION_OPCODE(PUT_ARP)                      \
-        ACTION_OPCODE(PUT_DHCP_OPTS)                \
-        ACTION_OPCODE(ND_NA)                        \
-        ACTION_OPCODE(ND_NA_ROUTER)                 \
-        ACTION_OPCODE(PUT_ND)                       \
-        ACTION_OPCODE(PUT_FDB)                      \
-        ACTION_OPCODE(PUT_DHCPV6_OPTS)              \
-        ACTION_OPCODE(DNS_LOOKUP)                   \
-        ACTION_OPCODE(LOG)                          \
-        ACTION_OPCODE(PUT_ND_RA_OPTS)               \
-        ACTION_OPCODE(ND_NS)                        \
-        ACTION_OPCODE(ICMP)                         \
-        ACTION_OPCODE(ICMP4_ERROR)                  \
-        ACTION_OPCODE(ICMP6_ERROR)                  \
-        ACTION_OPCODE(TCP_RESET)                    \
-        ACTION_OPCODE(SCTP_ABORT)                   \
-        ACTION_OPCODE(REJECT)                       \
-        ACTION_OPCODE(PUT_ICMP4_FRAG_MTU)           \
-        ACTION_OPCODE(PUT_ICMP6_FRAG_MTU)           \
-        ACTION_OPCODE(EVENT)                        \
-        ACTION_OPCODE(BIND_VPORT)                   \
-        ACTION_OPCODE(DHCP6_SERVER)                 \
-        ACTION_OPCODE(HANDLE_SVC_CHECK)             \
-        ACTION_OPCODE(BFD_MSG)
 #define ACTION_OPCODE(ENUM) \
     case ACTION_OPCODE_##ENUM: return xstrdup(#ENUM);
     ACTION_OPCODES

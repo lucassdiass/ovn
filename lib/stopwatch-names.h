@@ -34,5 +34,9 @@
 #define LR_NAT_RUN_STOPWATCH_NAME "lr_nat_run"
 #define LR_STATEFUL_RUN_STOPWATCH_NAME "lr_stateful"
 #define LS_STATEFUL_RUN_STOPWATCH_NAME "ls_stateful"
+#define ADVERTISED_ROUTE_SYNC_RUN_STOPWATCH_NAME "advertised_route_sync"
+#define LEARNED_ROUTE_SYNC_RUN_STOPWATCH_NAME "learned_route_sync"
+#define DYNAMIC_ROUTES_RUN_STOPWATCH_NAME "dynamic_routes"
+#define GROUP_ECMP_ROUTE_RUN_STOPWATCH_NAME "group_ecmp_route"
 
 #endif

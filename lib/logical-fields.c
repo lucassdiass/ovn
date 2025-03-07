@@ -139,6 +139,14 @@ ovn_init_symtab(struct shash *symtab)
                              flags_str);
     snprintf(flags_str, sizeof flags_str, "flags[%d]", MLF_RX_FROM_TUNNEL_BIT);
     expr_symtab_add_subfield(symtab, "flags.tunnel_rx", NULL, flags_str);
+    snprintf(flags_str, sizeof flags_str, "flags[%d]",
+             MLF_UNSNAT_NEW_BIT);
+    expr_symtab_add_subfield(symtab, "flags.unsnat_new", NULL,
+                             flags_str);
+    snprintf(flags_str, sizeof flags_str, "flags[%d]",
+             MLF_UNSNAT_NOT_TRACKED_BIT);
+    expr_symtab_add_subfield(symtab, "flags.unsnat_not_tracked", NULL,
+                             flags_str);
 
     snprintf(flags_str, sizeof flags_str, "flags[%d]", MLF_FROM_CTRL_BIT);
     expr_symtab_add_subfield(symtab, "flags.from_ctrl", NULL, flags_str);
@@ -174,6 +182,11 @@ ovn_init_symtab(struct shash *symtab)
                                     OVN_CT_STR(OVN_CT_OBS_STAGE_END_BIT)
                                     "]",
                                     WR_CT_COMMIT);
+    expr_symtab_add_subfield_scoped(symtab, "ct_mark.allow_established", NULL,
+                                    "ct_mark["
+                                    OVN_CT_STR(OVN_CT_ALLOW_ESTABLISHED_BIT)
+                                    "]",
+                                    WR_CT_COMMIT);
     expr_symtab_add_subfield_scoped(symtab, "ct_mark.obs_collector_id", NULL,
                                     "ct_mark[16..23]", WR_CT_COMMIT);
 
@@ -190,6 +203,8 @@ ovn_init_symtab(struct shash *symtab)
                                     "ct_label[96..127]", WR_CT_COMMIT);
     expr_symtab_add_subfield_scoped(symtab, "ct_label.obs_unused", NULL,
                                     "ct_label[0..95]", WR_CT_COMMIT);
+    expr_symtab_add_subfield_scoped(symtab, "ct_label.acl_id", NULL,
+                                    "ct_label[80..95]", WR_CT_COMMIT);
 
     expr_symtab_add_field(symtab, "ct_state", MFF_CT_STATE, NULL, false);
 

@@ -117,17 +117,18 @@
       <dd>
         <p>
           A boolean value that tells if <code>ovn-controller</code> should
-          monitor all records of tables in <var>ovs-database</var>.  If
-          set to <code>false</code>, it will conditionally monitor the records
-          that is needed in the current chassis.
+          monitor all records of tables in the <code>OVN_Southbound</code>.
+          If this option is set to <code>false</code>, ovn-controller will
+          conditionally monitor only the records that are needed for the local
+          chassis.
         </p>
         <p>
           It is more efficient to set it to <code>true</code> in use cases
           where the chassis would anyway need to monitor most of the records in
-          <var>OVN Southbound</var> database, which would save the overhead of
-          conditions processing, especially for server side.  Typically, set it
-          to <code>true</code> for environments that all workloads need to be
-          reachable from each other.
+          the <code>OVN_Southbound</code> database, which would save the
+          overhead of conditions processing, especially for server side.
+          Typically, set it to <code>true</code> for environments where all
+          workloads need to be reachable from each other.
         </p>
         <p>
           NOTE: for efficiency and scalability in common scenarios
@@ -389,6 +390,16 @@
         cap for the exponential backoff used by <code>ovn-controller</code>
         to send GARPs packets.
       </dd>
+      <dt><code>external_ids:arp-nd-max-timeout-sec</code></dt>
+      <dd>
+        When used, this configuration value specifies the maximum timeout
+        (in seconds) between two consecutive ARP/ND packets sent by
+        <code>ovn-controller</code> to resolve ECMP nexthop mac address.
+        <code>ovn-controller</code> by default continuously sends ARP/ND
+        packets. Setting <code>external_ids:arp-nd-max-timeout-sec</code>
+        allows to cap for the exponential backoff used by <code>ovn-controller
+        </code> to send ARPs/NDs packets.
+      </dd>
       <dt><code>external_ids:ovn-bridge-remote</code></dt>
       <dd>
         <p>
@@ -402,6 +413,14 @@
           The inactivity probe interval of the connection to the OVN management
           bridge, in milliseconds. It defaults to zero.
           If the value is zero, it disables the inactivity probe.
+        </p>
+      </dd>
+      <dt><code>external_ids:dynamic-routing-port-mapping</code></dt>
+      <dd>
+        <p>
+          This setting works together with the Northbound
+          dynamic-routing-port-name option on Logical_Router_Ports.
+          See the <code>ovn-nb</code>(5) for more details.
         </p>
       </dd>
     </dl>

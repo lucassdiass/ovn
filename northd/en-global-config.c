@@ -71,6 +71,8 @@ en_global_config_run(struct engine_node *node , void *data)
 
     const struct nbrec_nb_global_table *nb_global_table =
         EN_OVSDB_GET(engine_get_input("NB_nb_global", node));
+    const struct nbrec_logical_switch_table *nbrec_ls_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
     const struct sbrec_sb_global_table *sb_global_table =
         EN_OVSDB_GET(engine_get_input("SB_sb_global", node));
     const struct sbrec_chassis_table *sbrec_chassis_table =
@@ -121,10 +123,19 @@ en_global_config_run(struct engine_node *node , void *data)
                      config_data->svc_monitor_mac);
     }
 
-    char *max_tunid = xasprintf("%d",
-                                get_ovn_max_dp_key_local(
-                                    is_vxlan_mode(&nb->options,
-                                                  sbrec_chassis_table)));
+    bool ic_vxlan_mode = false;
+    const struct nbrec_logical_switch *nbs;
+    NBREC_LOGICAL_SWITCH_TABLE_FOR_EACH (nbs, nbrec_ls_table) {
+        if (smap_get(&nbs->other_config, "ic-vxlan_mode")) {
+            ic_vxlan_mode = true;
+            break;
+        }
+    }
+    uint32_t max_dp_key =
+        get_ovn_max_dp_key_local(is_vxlan_mode(&nb->options,
+                                               sbrec_chassis_table),
+                                 ic_vxlan_mode);
+    char *max_tunid = xasprintf("%d", max_dp_key);
     smap_replace(options, "max_tunid", max_tunid);
     free(max_tunid);
 
@@ -371,6 +382,53 @@ node_global_config_handler(struct engine_node *node, void *data OVS_UNUSED)
     return true;
 }
 
+bool
+global_config_nb_logical_switch_handler(struct engine_node *node,
+                                        void *data)
+{
+    struct ed_type_global_config *config_data = data;
+    const struct nbrec_logical_switch_table *nbrec_ls_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
+    const struct nbrec_nb_global *nb = nbrec_nb_global_table_first(
+                EN_OVSDB_GET(engine_get_input("NB_nb_global", node)));
+    const struct sbrec_chassis_table *sbrec_chassis_table =
+        EN_OVSDB_GET(engine_get_input("SB_chassis", node));
+
+    bool ic_vxlan_mode = false;
+    const struct nbrec_logical_switch *nbs;
+    NBREC_LOGICAL_SWITCH_TABLE_FOR_EACH (nbs, nbrec_ls_table) {
+        if (smap_get(&nbs->other_config, "ic-vxlan_mode")) {
+            ic_vxlan_mode = true;
+            break;
+        }
+    }
+    uint32_t max_dp_key =
+        get_ovn_max_dp_key_local(is_vxlan_mode(&nb->options,
+                                               sbrec_chassis_table),
+                                 ic_vxlan_mode);
+    char *max_tunid = xasprintf("%d", max_dp_key);
+    struct smap *options = &config_data->nb_options;
+    const char *cur_max_tunid = smap_get(options, "max_tunid");
+
+    if (!cur_max_tunid || strcmp(max_tunid, cur_max_tunid)) {
+        engine_set_node_state(node, EN_UPDATED);
+    } else {
+        engine_set_node_state(node, EN_UNCHANGED);
+    }
+
+    smap_replace(options, "max_tunid", max_tunid);
+    free(max_tunid);
+
+    if (!smap_equal(&nb->options, options)) {
+        nbrec_nb_global_verify_options(nb);
+        nbrec_nb_global_set_options(nb, options);
+    }
+
+    config_data->tracked = true;
+
+    return true;
+}
+
 /* static functions. */
 static void
 northd_enable_all_features(struct ed_type_global_config *data)
@@ -383,6 +441,7 @@ northd_enable_all_features(struct ed_type_global_config *data)
         .ct_commit_to_zone = true,
         .sample_with_reg = true,
         .ct_next_zone = true,
+        .ct_label_flush = true,
     };
 }
 
@@ -461,6 +520,15 @@ build_chassis_features(const struct sbrec_chassis_table *sbrec_chassis_table,
         if (!ct_next_zone &&
             chassis_features->ct_next_zone) {
             chassis_features->ct_next_zone = false;
+        }
+
+        bool ct_label_flush =
+                smap_get_bool(&chassis->other_config,
+                              OVN_FEATURE_CT_LABEL_FLUSH,
+                              false);
+        if (!ct_label_flush &&
+            chassis_features->ct_label_flush) {
+            chassis_features->ct_label_flush = false;
         }
     }
 }
@@ -561,6 +629,11 @@ check_nb_options_out_of_sync(
         return true;
     }
 
+    if (config_out_of_sync(&nb->options, &config_data->nb_options,
+                           "ecmp_nexthop_monitor_enable", false)) {
+        return true;
+    }
+
     return false;
 }
 
@@ -584,6 +657,10 @@ update_sb_config_options_to_sbrec(struct ed_type_global_config *config_data,
     /* Adds indication that northd is handling explicit output after
      * arp/nd_ns action. */
     smap_add(options, "arp_ns_explicit_output", "true");
+
+    /* Adds indication that northd has code with consolidated
+     * register usage. */
+    smap_add(options, "register_consolidation", "true");
 
     if (!smap_equal(&sb->options, options)) {
         sbrec_sb_global_set_options(sb, options);

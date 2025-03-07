@@ -23,9 +23,11 @@
 #include "en-lr-nat.h"
 #include "en-lr-stateful.h"
 #include "en-ls-stateful.h"
+#include "en-multicast.h"
 #include "en-northd.h"
 #include "en-meters.h"
 #include "en-sampling-app.h"
+#include "en-group-ecmp-route.h"
 #include "lflow-mgr.h"
 
 #include "lib/inc-proc-eng.h"
@@ -46,6 +48,8 @@ lflow_get_input_data(struct engine_node *node,
         engine_get_input_data("bfd_sync", node);
     struct routes_data *routes_data =
         engine_get_input_data("routes", node);
+    struct group_ecmp_route_data *group_ecmp_route_data =
+        engine_get_input_data("group_ecmp_route", node);
     struct route_policies_data *route_policies_data =
         engine_get_input_data("route_policies", node);
     struct port_group_data *pg_data =
@@ -56,15 +60,15 @@ lflow_get_input_data(struct engine_node *node,
         engine_get_input_data("lr_stateful", node);
     struct ed_type_ls_stateful *ls_stateful_data =
         engine_get_input_data("ls_stateful", node);
+    struct multicast_igmp_data *multicat_igmp_data =
+        engine_get_input_data("multicast_igmp", node);
 
     lflow_input->sbrec_logical_flow_table =
         EN_OVSDB_GET(engine_get_input("SB_logical_flow", node));
-    lflow_input->sbrec_multicast_group_table =
-        EN_OVSDB_GET(engine_get_input("SB_multicast_group", node));
-    lflow_input->sbrec_igmp_group_table =
-        EN_OVSDB_GET(engine_get_input("SB_igmp_group", node));
     lflow_input->sbrec_logical_dp_group_table =
         EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
+    lflow_input->sbrec_acl_id_table =
+        EN_OVSDB_GET(engine_get_input("SB_acl_id", node));
 
     lflow_input->sbrec_mcast_group_by_name_dp =
            engine_ovsdb_node_get_index(
@@ -82,9 +86,11 @@ lflow_get_input_data(struct engine_node *node,
     lflow_input->lb_datapaths_map = &northd_data->lb_datapaths_map;
     lflow_input->svc_monitor_map = &northd_data->svc_monitor_map;
     lflow_input->bfd_ports = &bfd_sync_data->bfd_ports;
-    lflow_input->parsed_routes = &routes_data->parsed_routes;
+    lflow_input->route_data = group_ecmp_route_data;
     lflow_input->route_tables = &routes_data->route_tables;
     lflow_input->route_policies = &route_policies_data->route_policies;
+    lflow_input->igmp_groups = &multicat_igmp_data->igmp_groups;
+    lflow_input->igmp_lflow_ref = multicat_igmp_data->lflow_ref;
 
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
@@ -110,6 +116,7 @@ void en_lflow_run(struct engine_node *node, void *data)
     struct lflow_data *lflow_data = data;
     lflow_table_clear(lflow_data->lflow_table);
     lflow_reset_northd_refs(&lflow_input);
+    lflow_ref_clear(lflow_input.igmp_lflow_ref);
 
     build_lflows(eng_ctx->ovnsb_idl_txn, &lflow_input,
                  lflow_data->lflow_table);
@@ -213,6 +220,114 @@ lflow_ls_stateful_handler(struct engine_node *node, void *data)
                                           &lflow_input,
                                           lflow_data->lflow_table)) {
         return false;
+    }
+
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
+
+bool
+lflow_multicast_igmp_handler(struct engine_node *node, void *data)
+{
+    struct multicast_igmp_data *mcast_igmp_data =
+        engine_get_input_data("multicast_igmp", node);
+
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct lflow_data *lflow_data = data;
+    struct lflow_input lflow_input;
+    lflow_get_input_data(node, &lflow_input);
+
+    if (!lflow_ref_resync_flows(mcast_igmp_data->lflow_ref,
+                                lflow_data->lflow_table,
+                                eng_ctx->ovnsb_idl_txn,
+                                lflow_input.ls_datapaths,
+                                lflow_input.lr_datapaths,
+                                lflow_input.ovn_internal_version_changed,
+                                lflow_input.sbrec_logical_flow_table,
+                                lflow_input.sbrec_logical_dp_group_table)) {
+        return false;
+    }
+
+    build_igmp_lflows(&mcast_igmp_data->igmp_groups,
+                      &lflow_input.ls_datapaths->datapaths,
+                      lflow_data->lflow_table,
+                      mcast_igmp_data->lflow_ref);
+
+    if (!lflow_ref_sync_lflows(mcast_igmp_data->lflow_ref,
+                               lflow_data->lflow_table,
+                               eng_ctx->ovnsb_idl_txn,
+                               lflow_input.ls_datapaths,
+                               lflow_input.lr_datapaths,
+                               lflow_input.ovn_internal_version_changed,
+                               lflow_input.sbrec_logical_flow_table,
+                               lflow_input.sbrec_logical_dp_group_table)) {
+        return false;
+    }
+
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
+
+bool
+lflow_group_ecmp_route_change_handler(struct engine_node *node,
+                                      void *data OVS_UNUSED)
+{
+    struct group_ecmp_route_data *group_ecmp_route_data =
+        engine_get_input_data("group_ecmp_route", node);
+
+    /* If we do not have tracked data we need to recompute. */
+    if (!group_ecmp_route_data->tracked) {
+        return false;
+    }
+
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct lflow_data *lflow_data = data;
+
+    struct lflow_input lflow_input;
+    lflow_get_input_data(node, &lflow_input);
+
+    struct group_ecmp_datapath *route_node;
+    struct hmapx_node *hmapx_node;
+
+    /* We need to handle deletions before additions as they could potentially
+     * overlap. */
+    HMAPX_FOR_EACH (hmapx_node,
+                    &group_ecmp_route_data->trk_data.deleted_datapath_routes) {
+        route_node = hmapx_node->data;
+        lflow_ref_unlink_lflows(route_node->lflow_ref);
+
+        bool handled = lflow_ref_sync_lflows(
+            route_node->lflow_ref, lflow_data->lflow_table,
+            eng_ctx->ovnsb_idl_txn, lflow_input.ls_datapaths,
+            lflow_input.lr_datapaths,
+            lflow_input.ovn_internal_version_changed,
+            lflow_input.sbrec_logical_flow_table,
+            lflow_input.sbrec_logical_dp_group_table);
+        if (!handled) {
+            return false;
+        }
+    }
+
+    /* Now we handle created or updated route nodes. */
+    struct hmapx *crupdated_datapath_routes =
+        &group_ecmp_route_data->trk_data.crupdated_datapath_routes;
+    HMAPX_FOR_EACH (hmapx_node, crupdated_datapath_routes) {
+        route_node = hmapx_node->data;
+        lflow_ref_unlink_lflows(route_node->lflow_ref);
+        build_route_data_flows_for_lrouter(
+            route_node->od, lflow_data->lflow_table,
+            route_node, lflow_input.bfd_ports);
+
+        bool handled = lflow_ref_sync_lflows(
+            route_node->lflow_ref, lflow_data->lflow_table,
+            eng_ctx->ovnsb_idl_txn, lflow_input.ls_datapaths,
+            lflow_input.lr_datapaths,
+            lflow_input.ovn_internal_version_changed,
+            lflow_input.sbrec_logical_flow_table,
+            lflow_input.sbrec_logical_dp_group_table);
+        if (!handled) {
+            return false;
+        }
     }
 
     engine_set_node_state(node, EN_UPDATED);

@@ -8,6 +8,8 @@ northd_ovn_northd_SOURCES = \
 	northd/northd.c \
 	northd/northd.h \
 	northd/ovn-northd.c \
+	northd/en-ecmp-nexthop.c \
+	northd/en-ecmp-nexthop.h \
 	northd/en-global-config.c \
 	northd/en-global-config.h \
 	northd/en-northd.c \
@@ -16,6 +18,8 @@ northd_ovn_northd_SOURCES = \
 	northd/en-lflow.h \
 	northd/en-meters.c \
 	northd/en-meters.h \
+	northd/en-multicast.c \
+	northd/en-multicast.h \
 	northd/en-northd-output.c \
 	northd/en-northd-output.h \
 	northd/en-port-group.c \
@@ -34,6 +38,14 @@ northd_ovn_northd_SOURCES = \
 	northd/en-ls-stateful.h \
 	northd/en-sampling-app.c \
 	northd/en-sampling-app.h \
+	northd/en-acl-ids.c \
+	northd/en-acl-ids.h \
+	northd/en-advertised-route-sync.c \
+	northd/en-advertised-route-sync.h \
+	northd/en-learned-route-sync.c \
+	northd/en-learned-route-sync.h \
+	northd/en-group-ecmp-route.c \
+	northd/en-group-ecmp-route.h \
 	northd/inc-proc-northd.c \
 	northd/inc-proc-northd.h \
 	northd/ipam.c \

@@ -163,7 +163,9 @@ void set_idl_probe_interval(struct ovsdb_idl *idl, const char *remote,
 #define OVN_MAX_DP_KEY_GLOBAL OVN_MAX_DP_KEY
 
 #define OVN_MAX_DP_VXLAN_KEY ((1u << 12) - 1)
-#define OVN_MAX_DP_VXLAN_KEY_LOCAL (OVN_MAX_DP_KEY - OVN_MAX_DP_GLOBAL_NUM)
+#define OVN_MAX_DP_VXLAN_KEY_LOCAL  ((1u << 10) - 1)
+#define OVN_MIN_DP_VXLAN_KEY_GLOBAL (OVN_MAX_DP_VXLAN_KEY_LOCAL + 1)
+#define OVN_MAX_DP_VXLAN_KEY_GLOBAL ((1u << 12) - 1)
 
 struct hmap;
 void ovn_destroy_tnlids(struct hmap *tnlids);
@@ -207,6 +209,7 @@ bool ip46_parse(const char *ip_str, struct in6_addr *ip);
 char *normalize_ipv4_prefix(ovs_be32 ipv4, unsigned int plen);
 char *normalize_ipv6_prefix(const struct in6_addr *ipv6, unsigned int plen);
 char *normalize_v46_prefix(const struct in6_addr *prefix, unsigned int plen);
+char *normalize_v46(const struct in6_addr *prefix);
 
 /* Returns a lowercase copy of orig.
  * Caller must free the returned string.
@@ -486,5 +489,11 @@ void ovn_exit_args_finish(struct ovn_exit_args *exit_args);
 
 bool ovn_update_swconn_at(struct rconn *swconn, const char *target,
                           int probe_interval, const char *where);
+
+bool prefix_is_link_local(const struct in6_addr *prefix, unsigned int plen);
+
+const struct sbrec_port_binding *lport_lookup_by_name(
+    struct ovsdb_idl_index *sbrec_port_binding_by_name,
+    const char *name);
 
 #endif /* OVN_UTIL_H */

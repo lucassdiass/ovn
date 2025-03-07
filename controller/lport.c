@@ -28,22 +28,6 @@ static const struct sbrec_port_binding *get_peer_lport(
     struct ovsdb_idl_index *sbrec_port_binding_by_name);
 
 const struct sbrec_port_binding *
-lport_lookup_by_name(struct ovsdb_idl_index *sbrec_port_binding_by_name,
-                     const char *name)
-{
-    struct sbrec_port_binding *pb = sbrec_port_binding_index_init_row(
-        sbrec_port_binding_by_name);
-    sbrec_port_binding_index_set_logical_port(pb, name);
-
-    const struct sbrec_port_binding *retval = sbrec_port_binding_index_find(
-        sbrec_port_binding_by_name, pb);
-
-    sbrec_port_binding_index_destroy_row(pb);
-
-    return retval;
-}
-
-const struct sbrec_port_binding *
 lport_lookup_by_key_with_dp(struct ovsdb_idl_index *sbrec_port_binding_by_key,
                             const struct sbrec_datapath_binding *db,
                             uint64_t port_key)
@@ -79,14 +63,11 @@ lport_lookup_by_key(struct ovsdb_idl_index *sbrec_datapath_binding_by_key,
                                        port_key);
 }
 
-bool
-lport_is_chassis_resident(struct ovsdb_idl_index *sbrec_port_binding_by_name,
-                          const struct sbrec_chassis *chassis,
-                          const struct sset *active_tunnels,
-                          const char *port_name)
+static bool
+lport_pb_is_chassis_resident(const struct sbrec_chassis *chassis,
+                             const struct sset *active_tunnels,
+                             const struct sbrec_port_binding *pb)
 {
-    const struct sbrec_port_binding *pb
-        = lport_lookup_by_name(sbrec_port_binding_by_name, port_name);
     if (!pb || !pb->chassis) {
         return false;
     }
@@ -96,6 +77,39 @@ lport_is_chassis_resident(struct ovsdb_idl_index *sbrec_port_binding_by_name,
         return ha_chassis_group_is_active(pb->ha_chassis_group,
                                           active_tunnels, chassis);
     }
+}
+
+bool
+lport_is_chassis_resident(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                          const struct sbrec_chassis *chassis,
+                          const struct sset *active_tunnels,
+                          const char *port_name)
+{
+    const struct sbrec_port_binding *pb
+        = lport_lookup_by_name(sbrec_port_binding_by_name, port_name);
+    return lport_pb_is_chassis_resident(chassis, active_tunnels, pb);
+}
+
+bool
+lport_is_local(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+               const struct sbrec_chassis *chassis,
+               const struct sset *active_tunnels,
+               const char *port_name)
+{
+    const struct sbrec_port_binding *pb = lport_lookup_by_name(
+        sbrec_port_binding_by_name, port_name);
+
+    if (lport_pb_is_chassis_resident(chassis, active_tunnels, pb)) {
+        return true;
+    }
+
+    const char *crp = smap_get(&pb->options, "chassis-redirect-port");
+    if (!crp) {
+        return false;
+    }
+
+    return lport_is_chassis_resident(sbrec_port_binding_by_name, chassis,
+                                     active_tunnels, crp);
 }
 
 const struct sbrec_port_binding *

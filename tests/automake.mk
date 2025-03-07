@@ -92,6 +92,7 @@ MULTINODE_TESTSUITE_RESULTS = $(MULTINODE_TESTSUITE_DIR)/results
 AUTOTEST_PATH = $(ovs_builddir)/utilities:$(ovs_builddir)/vswitchd:$(ovs_builddir)/ovsdb:$(ovs_builddir)/vtep:tests:$(PTHREAD_WIN32_DIR_DLL):$(SSL_DIR):controller-vtep:northd:utilities:controller:ic
 
 export ovs_srcdir
+export ovs_builddir
 
 check-local:
 	set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH); \
@@ -304,8 +305,14 @@ tests_ovstest_LDADD = $(OVS_LIBDIR)/daemon.lo \
 	controller/ofctrl-seqno.$(OBJEXT) \
 	controller/ovsport.$(OBJEXT) \
 	controller/patch.$(OBJEXT) \
+	controller/route.$(OBJEXT) \
 	controller/vif-plug.$(OBJEXT) \
 	northd/ipam.$(OBJEXT)
+
+if HAVE_NETLINK
+tests_ovstest_LDADD += \
+	controller/route-exchange-netlink.$(OBJEXT)
+endif
 
 # Python tests.
 CHECK_PYFILES = \
@@ -313,7 +320,9 @@ CHECK_PYFILES = \
 	tests/uuidfilt.py \
 	tests/test-tcp-rst.py \
 	tests/check_acl_log.py \
-	tests/scapy-server.py
+	tests/scapy-server.py \
+	tests/client.py \
+	tests/server.py
 
 EXTRA_DIST += $(CHECK_PYFILES)
 PYCOV_CLEAN_FILES += $(CHECK_PYFILES:.py=.py,cover) .coverage

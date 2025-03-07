@@ -394,6 +394,14 @@
         support HW VTEP functionality and main encap type is GENEVE or STT, set
         this option to <code>false</code> to use default
         non-<code>VXLAN mode</code> tunnel IDs allocation logic.
+        Please consider when OVN is running in <code>OVN-interconnect</code>
+        mode and it is using <code>VXLAN</code> encapsulation type, the max
+        number of non-transit logical switches and logical routers is reduced
+        to 1024.
+        Plese note, in order to enable <code>VXLAN</code> encapsulation type
+        for for cross-AZ traffic, <code>vxlan_mode</code> parameter in
+        <ref table="IC_NB_Global TABLE" db="OVN_IC_Northbound"/> must be set
+        to true.
       </column>
 
       <column name="options" key="always_tunnel"
@@ -409,6 +417,15 @@
           leakage of the router port mac address to the upstream switches
           and undefined behavior if NATting is involed.  This option is
           disabled by default.
+        </p>
+      </column>
+
+      <column name="options" key="ecmp_nexthop_monitor_enable">
+        <p>
+          If set to <code>true</code>., <code>ovn-northd</code> will create
+          entries in <ref table="ECMP_Nexthop TABLE" db="OVN_Southbound"/>
+          to track ECMP routes created with <code>--ecmp_symmetric_reply</code>
+          option.  By default this option is set to <code>false</code>.
         </p>
       </column>
 
@@ -879,6 +896,12 @@
         database.  This kind of logical switch is created and controlled
         by <code>ovn-ic</code>.
       </column>
+      <column name="other_config" key="ic-vxlan_mode"
+          type='{"type": "boolean"}'>
+        <code>ic-vxlan_mode</code> is set to true by <code>ovn-ic</code> when
+        it runs <code>VXLAN</code> as encapsulation protocol for cross-AZ
+        traffic. Default value is false.
+      </column>
     </group>
 
     <group title="Tunnel Key">
@@ -985,6 +1008,16 @@
             column="options" key="router-port"/> specifies the <ref
             column="name"/> of the <ref table="Logical_Router_Port"/>
             to which this logical switch port is connected.
+          </dd>
+
+          <dt><code>switch</code></dt>
+          <dd>
+            A connection to another logical switch.  The value of <ref
+            column="peer" /> specifies the <ref column="name"/> of the
+            <ref table="Logical_Switch_Port"/> to which this logical switch
+            port is connected.  Such ports always have an implicit "unknown"
+            address, because the address information is not leaked between
+            directly connected switches.
           </dd>
 
           <dt><code>localnet</code></dt>
@@ -1847,6 +1880,17 @@
       </column>
     </group>
 
+    <column name="peer">
+      <p>
+        For a switch port used to connect two logical switches, this
+        identifies the other switch port in the pair by <ref column="name"/>.
+      </p>
+
+      <p>
+        For a switch port attached to a logical router, this column is empty.
+      </p>
+    </column>
+
     <group title="DHCP">
       <column name="dhcpv4_options">
         This column defines the DHCPv4 Options to be included by the
@@ -2164,6 +2208,13 @@
         CMS can choose the <code>hash</code> selection method by setting the
         selection fields in this column. <code>ovs-vswitchd</code> uses the
         specified fields in generating the hash.
+      </p>
+
+      <p>
+        Example: <code>{ip_proto,ip_src,ip_dst}</code> for a 3-tuple match.
+        Example: <code>{ip_proto,ipv6_src,ipv6_dst}</code> for an IPv6 match.
+        Example: <code>{ip_proto,ip_src,ip_dst,tp_src,tp_dst}</code>.
+        Example: <code>{ip_src,ip_dst,ipv6_src,ipv6_dst,tp_src,tp_dst}</code>.
       </p>
 
       <p>
@@ -2558,6 +2609,32 @@ or
           of all the ACLs and the default deny/allow ACLs if any.
         </p>
       </column>
+
+      <column name="options" key="persist-established">
+        <p>
+          This option applies only to ACLs whose <ref column="action"/> is set
+          to <code>allow-related</code>.
+        </p>
+
+        <p>
+          <code>allow-related</code> ACLs create a conntrack entry when a
+          packet matches the ACL's <ref column="match"/> column. Typically,
+          traffic must continue to match these conditions in order to continue
+          to be allowed by the ACL. With this option set to <code>true</code>,
+          then the ACL match is bypassed once the original match occurs.
+          Instead, a mark bit in the conntrack entry is used to allow the
+          traffic. This means that traffic will continue to be allowed even if
+          the ACL's match changes and no longer matches the established
+          traffic.
+        </p>
+
+        <p>
+          The traffic will stop being allowed automatically if this option is
+          set to <code>false</code>, if the ACL's <ref column="action"/> is
+          changed to something other than <code>allow-related</code>, or if the
+          ACL is destroyed.
+        </p>
+      </column>
     </group>
 
     <group title="Logging">
@@ -2946,6 +3023,144 @@ or
         option is not present the limit is not set and the zone limit is
         derived from OvS default datapath limit.
       </column>
+
+      <column name="options" key="dynamic-routing" type='{"type": "boolean"}'>
+        If set to <code>true</code> then this <ref table="Logical_Router"/>
+        can participate in dynamic routing with components outside of OVN.
+
+        It will synchronize all routes to the soutbound
+        <ref table="Advertised_Route" db="OVN_Southbound"/> table that are
+        relevant for the router. This includes:
+        <ul>
+          <li>
+            all "connected" routes implicitly created by networks
+            associated with this Logical Router
+          </li>
+          <li>
+            all <ref table="Logical_Router_Static_Route"/> that are
+            applied to this Logical Router
+          </li>
+        </ul>
+
+        Users will need to use the following settings to opt into individual
+        route types that should be advertised. See:
+        <ul>
+        <li><ref column="options" key="dynamic-routing-redistribute"
+                 table="Logical_Router"/> on Logical_Router</li>
+        <li><ref column="options" key="dynamic-routing-redistribute"
+                 table="Logical_Router_Port"/> on Logical_Router_Port</li>
+        </ul>
+      </column>
+
+      <column name="options" key="dynamic-routing-redistribute"
+              type='{"type": "string"}'>
+        <p>
+          Only relevant if <ref column="options" key="dynamic-routing"
+          table="Logical_Router"/> is set to <code>true</code>.
+        </p>
+
+        <p>
+          This is a list of elements separated by <code>,</code>.
+        </p>
+
+        <p>
+          If <code>connected</code> is in the list then northd will synchronize
+          all "connected" routes to the southbound <ref
+          table="Advertised_Route" db="OVN_Southbound"/> table. "Connected"
+          here means routes implicitly created by networks associated with
+          the LRPs.
+        </p>
+
+        <p>
+          If <code>connected-as-host</code> is in the list then northd will
+          enumerate all actively used individual IPs of a "connected" route and
+          announce these IPs as host routes instead of announcing the subnet.
+          This includes LSP and LRP addresses on the network as well as NAT
+          entries of remove Logical_Routers on this network.
+          Setting this implies the setting <code>connected</code>.
+
+          This setting can be used to:
+          <ul>
+            <li>
+              allow the fabric outside of OVN to drop traffic towards IP
+              addresses that are not actually used. This traffic would
+              otherwise hit this LR and then be dropped.
+            </li>
+
+            <li>
+              If this LR has multiple LRPs connected to the fabric on different
+              chassis: allows the fabric outside of OVN to steer packets to the
+              chassis which already hosts this backing ip address.
+            </li>
+          </ul>
+        </p>
+
+        <p>
+          If <code>static</code> is in the list then northd will synchronize
+          all <ref table="Logical_Router_Static_Route"/> to the southbound
+          <ref table="Advertised_Route" db="OVN_Southbound"/> table.
+        </p>
+
+        <p>
+          If <code>lb</code> is in the list then northd will create entries in
+          <ref table="Advertised_Route" db="OVN_Southbound"/> table for each
+          Load Balancer VIP on this router and it's neighboring routers.
+          Neighboring routers are those that are either directly connected,
+          via Logical Router Port, or those that are connected via shared
+          Logical Switch.
+        </p>
+
+        <p>
+          If <code>nat</code> is in the list then northd will create entries in
+          <ref table="Advertised_Route" db="OVN_Southbound"/> table for each
+          NAT's external IP on this router and it's neighboring routers.
+          Neighboring routers are those that are either directly connected,
+          via Logical Router Port, or those that are connected via shared
+          Logical Switch.
+        </p>
+
+        <p>
+          This value can be overwritten on a per LRP basis using
+          <ref column="options" key="dynamic-routing-redistribute"
+               table="Logical_Router_Port"/> on the Logical_Router_Port.
+        </p>
+      </column>
+
+      <column name="options" key="dynamic-routing-vrf-name"
+          type='{"type": "string"}'>
+        <p>
+          Only relevant if <ref column="options" key="dynamic-routing"/>
+          is set to <code>true</code>.
+        </p>
+
+        <p>
+          This defines the name of the vrf the ovn-controller will use to
+          advertise and learn routes. If not set the vrf will be named "ovnvrf"
+          with the datapath id of the Logical Router appended to it.
+        </p>
+
+        <p>
+          The vrf name must be a valid linux interface name. If it is too long
+          the generated name will be used instead.
+        </p>
+
+        <p>
+          The vrf table id is not affected by this setting. For details see
+          <ref column="options" key="dynamic-routing-maintain-vrf"
+               table="Logical_Router"/> on the Logical_Router.
+        </p>
+      </column>
+
+      <column name="options" key="ct-commit-all" type='{"type": "boolean"}'>
+        When enabled the LR will commit traffic in a zone that is stateful.
+        The traffic is not commited to both zones but it is selective based
+        whether there is stateful DNAT/SNAT or both. The commit all will
+        prevent issues with <code>ct.inv</code> packets as it will prevent
+        the commit of reply traffic, which could happen in some cases. This
+        also helps with HWOL as there shouldn't be any match on ct.new
+        for established sessions as we will commit everything in addition
+        to already existing stateful NATs and LBs.
+      </column>
     </group>
 
     <group title="Common Columns">
@@ -3095,6 +3310,32 @@ or
     <column name="external_ids">
       See <em>External IDs</em> at the beginning of this document.
     </column>
+
+    <group title="Transit router">
+      <p>
+        In order to achieve status of <code>Transit Router</code> for
+        <ref table="Logical_Router"/> there needs to be at least one
+        <ref table="Logical_Router_Port"/> that is considered remote.
+        The LRP can be <code>remote</code> only if it has
+        <code>options:requested-chassis</code> set to chassis that is
+        considered remote. See <ref table="Logical_Router_Port"/> for more
+        details.
+      </p>
+
+      <p>
+        In order for the <code>Transit Router</code> to work properly all the
+        tunnel keys for the <code>Transit Router</code> itself and the remote
+        ports keys needs to match  in all AZs e.g. TR in AZ1 and AZ2 needs to
+        have the same tunnel key. Remote port for AZ2 in AZ1 needs to have the
+        same tunnel key as local port in AZ2 and vice vers.
+      </p>
+
+      <p>
+        The <code>Transit Router</code> behaves as distributed router which
+        means that it has the same limitations for stateful flows like
+        <code>NAT and LBs</code> and it will lose the CT state between AZs.
+      </p>
+    </group>
   </table>
 
   <table name="Meter" title="Meter entry">
@@ -3494,7 +3735,9 @@ or
 
       <column name="ipv6_ra_configs" key="send_periodic">
         If set to true, then this router interface will send router
-        advertisements periodically.  The default is false.
+        advertisements periodically. This option has no effect if <ref
+        column="ipv6_ra_configs" key="address_mode"/> is not set. The default
+        is false.
       </column>
 
       <column name="ipv6_ra_configs" key="max_interval">
@@ -3594,10 +3837,6 @@ or
       <column name="options" key="routing-protocol-redirect"
               type='{"type": "string"}'>
         <p>
-          NOTE: this feature is experimental and may be subject to
-          removal/change in the future.
-        </p>
-        <p>
           This option expects a name of a Logical Switch Port that's present
           in the peer's Logical Switch. If set, it causes any traffic
           that's destined for Logical Router Port's IP addresses (including
@@ -3613,10 +3852,6 @@ or
 
       <column name="options" key="routing-protocols" type='{"type": "string"}'>
         <p>
-          NOTE: this feature is experimental and may be subject to
-          removal/change in the future.
-        </p>
-        <p>
           This option expects a comma-separated list of routing, and
           routing-related protocols, whose control plane traffic will be
           redirected to a port specified in
@@ -3631,6 +3866,43 @@ or
             <code>BFD</code> (forwards UDP port 3784)
           </li>
         </ul>
+        <p>
+          Note that for BGP to work in "unnumbered mode" (advertising IPv4
+          routes over IPv6 network, with automatic on-link peer discovery),
+          Logical Router Port needs to enable sending of periodic IPv6 Router
+          Announcements (see the <ref column="ipv6_ra_configs"
+          key="send_periodic"/>).
+
+          Recommended minimal configuration of periodic RAs for BGP unnumbered:
+
+          <ul>
+            <li>
+              <ref column="ipv6_ra_configs" key="address_mode"/>
+              = <code>slaac</code> (Any valid value is OK, but the option
+              needs to be set)
+            </li>
+            <li>
+              <ref column="ipv6_ra_configs" key="send_periodic"/>
+              = <code>true</code>
+            </li>
+            <li>
+              <ref column="ipv6_ra_configs" key="max_interval"/>
+              = <code>10</code>
+            </li>
+            <li>
+              <ref column="ipv6_ra_configs" key="min_interval"/>
+              = <code>5</code>
+            </li>
+          </ul>
+
+          Feel free to adjust max and min interval values, but be aware that
+          they influence speed at which the initial BGP session is
+          established. With the above values, the session will be established
+          in 5 to 10 seconds.
+
+          Please refer to RFC 8950 for more details about advertising IPv4
+          networks over IPv6 next-hop addresses.
+        </p>
       </column>
 
       <column name="options" key="gateway_mtu_bypass">
@@ -3670,6 +3942,160 @@ or
           <ref db="OVN_IC_Southbound"/> database, will be filtered and not
           learned by the <code>ovn-ic</code> daemon.
         </p>
+      </column>
+
+      <column name="options" key="requested-chassis">
+        <p>
+          If set, identifies a specific chassis (by name or hostname) that
+          is allowed to bind this port. This option is valid only for chassis
+          that have <code>options:is-remote=true</code>, in other words for
+          chassis that are in different Availability zone. The option accepts
+          only single value.
+        </p>
+
+        <p>
+          By assigning remote chassis the <ref table="Logical_Router"/> gains
+          status of <code>Transit Router</code> see
+          <ref table="Logical_Router"/> table for more details.
+        </p>
+      </column>
+
+      <column name="options" key="dynamic-routing-redistribute"
+              type='{"type": "string"}'>
+        <p>
+          Only relevant if <ref column="options" key="dynamic-routing"
+          table="Logical_Router"/> on the respective Logical_Router is set
+          to <code>true</code>.
+        </p>
+
+        <p>
+          This is a list of elements separated by <code>,</code>.
+        </p>
+
+        <p>
+          If <code>connected</code> is in the list then northd will synchronize
+          all "connected" routes to the southbound <ref
+          table="Advertised_Route" db="OVN_Southbound"/> table. "Connected"
+          here means routes implicitly created by networks associated with
+          the LRPs.
+        </p>
+
+        <p>
+          If <code>connected-as-host</code> is in the list then northd will
+          enumerate all actively used individual IPs of a "connected" route and
+          announce these IPs as host routes instead of announcing the subnet.
+          This includes LSP and LRP addresses on the network as well as NAT
+          entries of remove Logical_Routers on this network.
+          Setting this implies the setting <code>connected</code>.
+
+          This setting can be used to:
+          <ul>
+            <li>
+              allow the fabric outside of OVN to drop traffic towards IP
+              addresses that are not actually used. This traffic would
+              otherwise hit this LR and then be dropped.
+            </li>
+
+            <li>
+              If this LR has multiple LRPs connected to the fabric on different
+              chassis: allows the fabric outside of OVN to steer packets to the
+              chassis which already hosts this backing ip address.
+            </li>
+          </ul>
+        </p>
+
+        <p>
+          If <code>static</code> is in the list then northd will synchronize
+          all <ref table="Logical_Router_Static_Route"/> to the southbound
+          <ref table="Advertised_Route" db="OVN_Southbound"/> table.
+        </p>
+
+        <p>
+          If <code>lb</code> is in the list then northd will create entries in
+          <ref table="Advertised_Route" db="OVN_Southbound"/> table for each
+          Load Balancer VIP on this port's router, and it's neighboring
+          routers. Neighboring routers are those that are either directly
+          connected to this Logical Router Port, or those that are connected
+          via shared Logical Switch.
+        </p>
+
+        <p>
+          If <code>nat</code> is in the list then northd will create entries in
+          <ref table="Advertised_Route" db="OVN_Southbound"/> table for each
+          NAT's external IP on this port's router, and it's neighboring
+          routers. Neighboring routers are those that are either directly
+          connected to this Logical Router Port, or those that are connected
+          via shared Logical Switch.
+        </p>
+
+        <p>
+          If not set the value from <ref column="options"
+          key="dynamic-routing-redistribute" table="Logical_Router"/> on the
+          Logical_Router will be used.
+        </p>
+
+      </column>
+
+      <column name="options" key="dynamic-routing-maintain-vrf"
+         type='{"type": "boolean"}'>
+        <p>
+          Only relevant if <ref column="options" key="dynamic-routing"
+          table="Logical_Router"/> on the respective Logical_Router is set
+          to <code>true</code>.
+        </p>
+
+        <p>
+          If this LRP is bound to a specific chassis then the ovn-controller of
+          this chassis will maintain a vrf.
+          This vrf will contain all the routes that should be announced from
+          this LRP.
+          Unless <ref column="options" key="dynamic-routing-vrf-name"
+          table="Logical_Router"/> is set the vrf will be named "ovnvrf" with
+          the datapath id of the Logical Router appended to it.
+        </p>
+
+        <p>
+          If the setting is not set or false the ovn-controller will expect
+          this VRF to already exist. Some tooling outside of OVN needs to
+          ensure this.
+        </p>
+
+        <p>
+          The VRF table ID is the same as the tunnel key of the Logical_Router
+          datapath. If this setting is false the tooling outside of OVN needs
+          to ensure that this is the case.
+        </p>
+      </column>
+
+      <column name="options" key="dynamic-routing-port-name"
+          type='{"type": "string"}'>
+        Only relevant if <ref column="options" key="dynamic-routing"
+        table="Logical_Router"/> on the respective Logical_Router is set
+        to <code>true</code>.
+
+        Only learn routes associated with the interface locally bound to the
+        LSP or LRP specified here. This allows a single chassis to learn
+        different routes on separate LRPs bound to this chassis.
+
+        This is usefully e.g. in the case of a chassis with multiple links
+        towards the network fabric where all of them run BGP individually.
+        This option allows to have a 1:1 mapping between a single LRP and an
+        individual link.
+
+        If the port referenced by this name is bound locally on the
+        ovn-controller we lookup the linux interface name of this port. This
+        interface name is then used for the route filtering, so only routes
+        that have this interface as nexthop will be learned.
+
+        As there might not always be such a port bound on the ovn-controller
+        this value can also be an arbitrary string. The ovn-controller will
+        lookup the port name in the local <ref
+        key="dynamic-routing-port-mapping" table="Open_vSwitch"
+        column="external_ids" db="Open_vSwitch"/>. This is a list separated
+        by <code>,</code> that contains <code>port=interfacename</code> pairs.
+        If a match is found in there the configured interface name is used
+        instead of the autodiscovery. Also it is then irrelevant if the port
+        is bound locally.
       </column>
     </group>
 
@@ -3836,8 +4262,9 @@ or
         </p>
         <p>
           Example: <code>{ip_proto,ip_src,ip_dst}</code> for a 3-tuple match.
-          Example: <code>{ip_proto,ip_src,ip_dst,tp_src,tp_dst}</code>
-          for a 5-tuple match.
+          Example: <code>{ip_proto,ipv6_src,ipv6_dst}</code> for an IPv6 match.
+          Example: <code>{ip_proto,ip_src,ip_dst,tp_src,tp_dst}</code>.
+          Example: <code>{ip_src,ip_dst,ipv6_src,ipv6_dst,tp_src,tp_dst}</code>.
         </p>
     </column>
 
@@ -3951,7 +4378,15 @@ or
       <p>
         The routing policy's priority.  Rules with numerically higher priority
         take precedence over those with lower. A rule is uniquely identified
-        by the priority and match string.
+        by the priority, chain and match string.
+      </p>
+    </column>
+
+    <column name="chain">
+      <p>
+        The routing policy rule's chain name.  Only rules with empty chain name
+        are traversed by default.  Other chains are traversed as response to
+        jump action.
       </p>
     </column>
 
@@ -3986,7 +4421,19 @@ or
           <code>reroute</code>: Reroute packet to <ref column="nexthop"/> or
           <ref column="nexthops"/>.
         </li>
+
+        <li>
+          <code>jump</code>: Start examining rules that have the same
+          <ref column="chain"/> value as specified in
+          <ref column="jump_chain"/>.
+        </li>
       </ul>
+    </column>
+
+    <column name="jump_chain">
+      <p>
+        The routing policy rule's chain name selected to be examined next.
+      </p>
     </column>
 
     <column name="nexthop">

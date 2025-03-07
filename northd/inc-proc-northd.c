@@ -34,6 +34,7 @@
 #include "en-lr-stateful.h"
 #include "en-lr-nat.h"
 #include "en-ls-stateful.h"
+#include "en-multicast.h"
 #include "en-northd.h"
 #include "en-lflow.h"
 #include "en-northd-output.h"
@@ -41,6 +42,11 @@
 #include "en-sampling-app.h"
 #include "en-sync-sb.h"
 #include "en-sync-from-sb.h"
+#include "en-ecmp-nexthop.h"
+#include "en-acl-ids.h"
+#include "en-advertised-route-sync.h"
+#include "en-learned-route-sync.h"
+#include "en-group-ecmp-route.h"
 #include "unixctl.h"
 #include "util.h"
 
@@ -102,7 +108,11 @@ static unixctl_cb_func chassis_features_list;
     SB_NODE(fdb, "fdb") \
     SB_NODE(static_mac_binding, "static_mac_binding") \
     SB_NODE(chassis_template_var, "chassis_template_var") \
-    SB_NODE(logical_dp_group, "logical_dp_group")
+    SB_NODE(logical_dp_group, "logical_dp_group") \
+    SB_NODE(ecmp_nexthop, "ecmp_nexthop") \
+    SB_NODE(acl_id, "acl_id") \
+    SB_NODE(advertised_route, "advertised_route") \
+    SB_NODE(learned_route, "learned_route")
 
 enum sb_engine_node {
 #define SB_NODE(NAME, NAME_STR) SB_##NAME,
@@ -161,6 +171,14 @@ static ENGINE_NODE(route_policies, "route_policies");
 static ENGINE_NODE(routes, "routes");
 static ENGINE_NODE(bfd, "bfd");
 static ENGINE_NODE(bfd_sync, "bfd_sync");
+static ENGINE_NODE(ecmp_nexthop, "ecmp_nexthop");
+static ENGINE_NODE(multicast_igmp, "multicast_igmp");
+static ENGINE_NODE(acl_id, "acl_id");
+static ENGINE_NODE(advertised_route_sync, "advertised_route_sync");
+static ENGINE_NODE_WITH_CLEAR_TRACK_DATA(learned_route_sync,
+                                         "learned_route_sync");
+static ENGINE_NODE(dynamic_routes, "dynamic_routes");
+static ENGINE_NODE_WITH_CLEAR_TRACK_DATA(group_ecmp_route, "group_ecmp_route");
 
 void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                           struct ovsdb_idl_loop *sb)
@@ -180,11 +198,16 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
 
     engine_add_input(&en_global_config, &en_nb_nb_global,
                      global_config_nb_global_handler);
+    engine_add_input(&en_global_config, &en_nb_logical_switch,
+                     global_config_nb_logical_switch_handler);
     engine_add_input(&en_global_config, &en_sb_sb_global,
                      global_config_sb_global_handler);
     engine_add_input(&en_global_config, &en_sb_chassis,
                      global_config_sb_chassis_handler);
     engine_add_input(&en_global_config, &en_sampling_app, NULL);
+
+    engine_add_input(&en_acl_id, &en_nb_acl, NULL);
+    engine_add_input(&en_acl_id, &en_sb_acl_id, NULL);
 
     engine_add_input(&en_northd, &en_nb_mirror, NULL);
     engine_add_input(&en_northd, &en_nb_static_mac_binding, NULL);
@@ -263,19 +286,59 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_bfd_sync, &en_route_policies, NULL);
     engine_add_input(&en_bfd_sync, &en_northd, bfd_sync_northd_change_handler);
 
+    engine_add_input(&en_ecmp_nexthop, &en_global_config, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_routes, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_sb_ecmp_nexthop, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_sb_port_binding, NULL);
+    engine_add_input(&en_ecmp_nexthop, &en_sb_mac_binding,
+                     ecmp_nexthop_mac_binding_handler);
+
+    engine_add_input(&en_dynamic_routes, &en_lr_stateful, NULL);
+    /* No need for an explicit handler for northd changes.  Stateful
+     * configuration changes are passed through the en_lr_stateful input
+     * dependency.  We do need to access en_northd (input) data, i.e., to
+     * lookup OVN ports. */
+    engine_add_input(&en_dynamic_routes, &en_northd, engine_noop_handler);
+
+    engine_add_input(&en_advertised_route_sync, &en_routes, NULL);
+    engine_add_input(&en_advertised_route_sync, &en_dynamic_routes, NULL);
+    engine_add_input(&en_advertised_route_sync, &en_sb_advertised_route,
+                     NULL);
+    engine_add_input(&en_advertised_route_sync, &en_lr_stateful,
+                     advertised_route_sync_lr_stateful_change_handler);
+    engine_add_input(&en_advertised_route_sync, &en_northd,
+                     advertised_route_sync_northd_change_handler);
+
+    engine_add_input(&en_learned_route_sync, &en_sb_learned_route,
+                     learned_route_sync_sb_learned_route_change_handler);
+    engine_add_input(&en_learned_route_sync, &en_northd,
+                     learned_route_sync_northd_change_handler);
+
+    engine_add_input(&en_group_ecmp_route, &en_routes, NULL);
+    engine_add_input(&en_group_ecmp_route, &en_learned_route_sync,
+                     group_ecmp_route_learned_route_change_handler);
+
     engine_add_input(&en_sync_meters, &en_nb_acl, NULL);
     engine_add_input(&en_sync_meters, &en_nb_meter, NULL);
     engine_add_input(&en_sync_meters, &en_sb_meter, NULL);
+
+    engine_add_input(&en_multicast_igmp, &en_northd,
+                     multicast_igmp_northd_handler);
+    engine_add_input(&en_multicast_igmp, &en_sb_multicast_group, NULL);
+    engine_add_input(&en_multicast_igmp, &en_sb_igmp_group, NULL);
 
     engine_add_input(&en_lflow, &en_nb_acl, NULL);
     engine_add_input(&en_lflow, &en_sync_meters, NULL);
     engine_add_input(&en_lflow, &en_sb_logical_flow, NULL);
     engine_add_input(&en_lflow, &en_sb_multicast_group, NULL);
-    engine_add_input(&en_lflow, &en_sb_igmp_group, NULL);
     engine_add_input(&en_lflow, &en_sb_logical_dp_group, NULL);
     engine_add_input(&en_lflow, &en_bfd_sync, NULL);
     engine_add_input(&en_lflow, &en_route_policies, NULL);
     engine_add_input(&en_lflow, &en_routes, NULL);
+    /* XXX: The incremental processing only supports changes to learned routes.
+     * All other changes trigger a full recompute. */
+    engine_add_input(&en_lflow, &en_group_ecmp_route,
+                     lflow_group_ecmp_route_change_handler);
     engine_add_input(&en_lflow, &en_global_config,
                      node_global_config_handler);
 
@@ -285,6 +348,9 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lflow, &en_port_group, lflow_port_group_handler);
     engine_add_input(&en_lflow, &en_lr_stateful, lflow_lr_stateful_handler);
     engine_add_input(&en_lflow, &en_ls_stateful, lflow_ls_stateful_handler);
+    engine_add_input(&en_lflow, &en_multicast_igmp,
+                     lflow_multicast_igmp_handler);
+    engine_add_input(&en_lflow, &en_sb_acl_id, NULL);
 
     engine_add_input(&en_sync_to_sb_addr_set, &en_northd, NULL);
     engine_add_input(&en_sync_to_sb_addr_set, &en_lr_stateful, NULL);
@@ -335,6 +401,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_sync_from_sb, &en_sb_port_binding, NULL);
     engine_add_input(&en_sync_from_sb, &en_sb_ha_chassis_group, NULL);
 
+    engine_add_input(&en_northd_output, &en_acl_id, NULL);
     engine_add_input(&en_northd_output, &en_sync_from_sb, NULL);
     engine_add_input(&en_northd_output, &en_sync_to_sb,
                      northd_output_sync_to_sb_handler);
@@ -344,6 +411,12 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                      northd_output_mac_binding_aging_handler);
     engine_add_input(&en_northd_output, &en_fdb_aging,
                      northd_output_fdb_aging_handler);
+    engine_add_input(&en_northd_output, &en_ecmp_nexthop,
+                     northd_output_ecmp_nexthop_handler);
+    engine_add_input(&en_northd_output, &en_acl_id,
+                     northd_output_acl_id_handler);
+    engine_add_input(&en_northd_output, &en_advertised_route_sync,
+                     northd_output_advertised_route_sync_handler);
 
     struct engine_arg engine_arg = {
         .nb_idl = nb->idl,
@@ -362,6 +435,8 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
         chassis_hostname_index_create(sb->idl);
     struct ovsdb_idl_index *sbrec_mac_binding_by_datapath
         = mac_binding_by_datapath_index_create(sb->idl);
+    struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip
+        = mac_binding_by_lport_ip_index_create(sb->idl);
     struct ovsdb_idl_index *fdb_by_dp_key =
         ovsdb_idl_index_create1(sb->idl, &sbrec_fdb_col_dp_key);
 
@@ -385,6 +460,9 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_ovsdb_node_add_index(&en_sb_mac_binding,
                                 "sbrec_mac_binding_by_datapath",
                                 sbrec_mac_binding_by_datapath);
+    engine_ovsdb_node_add_index(&en_sb_mac_binding,
+                                "sbrec_mac_binding_by_lport_ip",
+                                sbrec_mac_binding_by_lport_ip);
     engine_ovsdb_node_add_index(&en_sb_fdb,
                                 "fdb_by_dp_key",
                                 fdb_by_dp_key);
@@ -407,6 +485,18 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_ovsdb_node_add_index(&en_sb_fdb,
                                 "sbrec_fdb_by_dp_and_port",
                                 sbrec_fdb_by_dp_and_port);
+
+    struct ovsdb_idl_index *sbrec_port_binding_by_name
+        = ovsdb_idl_index_create1(sb->idl,
+                                  &sbrec_port_binding_col_logical_port);
+    engine_ovsdb_node_add_index(&en_sb_port_binding,
+                                "sbrec_port_binding_by_name",
+                                sbrec_port_binding_by_name);
+    struct ovsdb_idl_index *sbrec_ecmp_nexthop_by_ip_and_port
+        = ecmp_nexthop_index_create(sb->idl);
+    engine_ovsdb_node_add_index(&en_sb_ecmp_nexthop,
+                                "sbrec_ecmp_nexthop_by_ip_and_port",
+                                sbrec_ecmp_nexthop_by_ip_and_port);
 
     struct ed_type_global_config *global_config =
         engine_get_internal_data(&en_global_config);

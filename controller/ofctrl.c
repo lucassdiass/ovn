@@ -54,6 +54,8 @@
 #include "vswitch-idl.h"
 #include "ovn-sb-idl.h"
 #include "ct-zone.h"
+#include "ecmp-next-hop-monitor.h"
+#include "acl-ids.h"
 
 VLOG_DEFINE_THIS_MODULE(ofctrl);
 
@@ -425,6 +427,7 @@ ofctrl_init(struct ovn_extend_table *group_table,
     tx_counter = rconn_packet_counter_create();
     hmap_init(&installed_lflows);
     hmap_init(&installed_pflows);
+    ecmp_nexthop_init();
     ovs_list_init(&flow_updates);
     ovn_init_symtab(&symtab);
     groups = group_table;
@@ -449,7 +452,8 @@ run_S_NEW(void)
 static void
 recv_S_NEW(const struct ofp_header *oh OVS_UNUSED,
            enum ofptype type OVS_UNUSED,
-           struct shash *pending_ct_zones OVS_UNUSED)
+           struct shash *pending_ct_zones OVS_UNUSED,
+           struct tracked_acl_ids *tracked_acl_ids OVS_UNUSED)
 {
     OVS_NOT_REACHED();
 }
@@ -537,7 +541,8 @@ process_tlv_table_reply(const struct ofputil_tlv_table_reply *reply)
 
 static void
 recv_S_TLV_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type,
-                           struct shash *pending_ct_zones OVS_UNUSED)
+                           struct shash *pending_ct_zones OVS_UNUSED,
+                           struct tracked_acl_ids *tracked_acl_ids OVS_UNUSED)
 {
     if (oh->xid != xid) {
         ofctrl_recv(oh, type);
@@ -593,7 +598,8 @@ run_S_TLV_TABLE_MOD_SENT(void)
 
 static void
 recv_S_TLV_TABLE_MOD_SENT(const struct ofp_header *oh, enum ofptype type,
-                          struct shash *pending_ct_zones OVS_UNUSED)
+                          struct shash *pending_ct_zones OVS_UNUSED,
+                          struct tracked_acl_ids *tracked_acl_ids OVS_UNUSED)
 {
     if (oh->xid != xid && oh->xid != xid2) {
         ofctrl_recv(oh, type);
@@ -648,7 +654,8 @@ run_S_WAIT_BEFORE_CLEAR(void)
 
 static void
 recv_S_WAIT_BEFORE_CLEAR(const struct ofp_header *oh, enum ofptype type,
-                         struct shash *pending_ct_zones OVS_UNUSED)
+                         struct shash *pending_ct_zones OVS_UNUSED,
+                         struct tracked_acl_ids *tracked_acl_ids OVS_UNUSED)
 {
     ofctrl_recv(oh, type);
 }
@@ -700,7 +707,8 @@ run_S_CLEAR_FLOWS(void)
 
 static void
 recv_S_CLEAR_FLOWS(const struct ofp_header *oh, enum ofptype type,
-                   struct shash *pending_ct_zones OVS_UNUSED)
+                   struct shash *pending_ct_zones OVS_UNUSED,
+                   struct tracked_acl_ids *tracked_acl_ids OVS_UNUSED)
 {
     ofctrl_recv(oh, type);
 }
@@ -722,32 +730,46 @@ run_S_UPDATE_FLOWS(void)
 }
 
 static void
-recv_S_UPDATE_FLOWS(const struct ofp_header *oh, enum ofptype type,
-                    struct shash *pending_ct_zones)
+flow_updates_handle_barrier_reply(const struct ofp_header *oh,
+                                  struct shash *pending_ct_zones)
 {
-    if (type == OFPTYPE_BARRIER_REPLY && !ovs_list_is_empty(&flow_updates)) {
-        struct ofctrl_flow_update *fup = ofctrl_flow_update_from_list_node(
-            ovs_list_front(&flow_updates));
-        if (fup->xid == oh->xid) {
-            if (fup->req_cfg >= cur_cfg) {
-                cur_cfg = fup->req_cfg;
-            }
-            mem_stats.oflow_update_usage -= ofctrl_flow_update_size(fup);
-            ovs_list_remove(&fup->list_node);
-            free(fup);
-        }
+    if (ovs_list_is_empty(&flow_updates)) {
+        return;
+    }
 
-        /* If the barrier xid is associated with an outstanding conntrack
-         * flush, the flush succeeded.  Move the pending ct zone entry
-         * to the next stage. */
-        struct shash_node *iter;
-        SHASH_FOR_EACH(iter, pending_ct_zones) {
-            struct ct_zone_pending_entry *ctzpe = iter->data;
-            if (ctzpe->state == CT_ZONE_OF_SENT && ctzpe->of_xid == oh->xid) {
-                ctzpe->state = CT_ZONE_DB_QUEUED;
-            }
+    struct ofctrl_flow_update *fup = ofctrl_flow_update_from_list_node(
+        ovs_list_front(&flow_updates));
+    if (fup->xid == oh->xid) {
+        if (fup->req_cfg >= cur_cfg) {
+            cur_cfg = fup->req_cfg;
         }
-    } else {
+        mem_stats.oflow_update_usage -= ofctrl_flow_update_size(fup);
+        ovs_list_remove(&fup->list_node);
+        free(fup);
+    }
+
+    /* If the barrier xid is associated with an outstanding conntrack
+     * flush, the flush succeeded.  Move the pending ct zone entry
+     * to the next stage. */
+    struct shash_node *iter;
+    SHASH_FOR_EACH (iter, pending_ct_zones) {
+        struct ct_zone_pending_entry *ctzpe = iter->data;
+        if (ctzpe->state == CT_ZONE_OF_SENT && ctzpe->of_xid == oh->xid) {
+            ctzpe->state = CT_ZONE_DB_QUEUED;
+        }
+    }
+
+}
+
+static void
+recv_S_UPDATE_FLOWS(const struct ofp_header *oh, enum ofptype type,
+                    struct shash *pending_ct_zones,
+                    struct tracked_acl_ids *tracked_acl_ids)
+{
+    if (type == OFPTYPE_BARRIER_REPLY) {
+        flow_updates_handle_barrier_reply(oh, pending_ct_zones);
+        acl_ids_handle_barrier_reply(tracked_acl_ids, oh->xid);
+    } else if (!acl_ids_handle_non_barrier_reply(oh, type, tracked_acl_ids)) {
         ofctrl_recv(oh, type);
     }
 }
@@ -774,7 +796,8 @@ ofctrl_get_mf_field_id(void)
 bool
 ofctrl_run(const char *conn_target, int probe_interval,
            const struct ovsrec_open_vswitch_table *ovs_table,
-           struct shash *pending_ct_zones)
+           struct shash *pending_ct_zones,
+           struct tracked_acl_ids *tracked_acl_ids)
 {
     bool reconnected = false;
 
@@ -832,7 +855,8 @@ ofctrl_run(const char *conn_target, int probe_interval,
             error = ofptype_decode(&type, oh);
             if (!error) {
                 switch (state) {
-#define STATE(NAME) case NAME: recv_##NAME(oh, type, pending_ct_zones); break;
+#define STATE(NAME) case NAME: recv_##NAME(oh, type, pending_ct_zones, \
+                                           tracked_acl_ids); break;
                     STATES
 #undef STATE
                 default:
@@ -877,6 +901,7 @@ ofctrl_destroy(void)
     expr_symtab_destroy(&symtab);
     shash_destroy(&symtab);
     ofctrl_meter_bands_destroy();
+    ecmp_nexthop_destroy();
 }
 
 uint64_t
@@ -2662,11 +2687,15 @@ void
 ofctrl_put(struct ovn_desired_flow_table *lflow_table,
            struct ovn_desired_flow_table *pflow_table,
            struct shash *pending_ct_zones,
+           struct shash *current_ct_zones,
            struct hmap *pending_lb_tuples,
+           const struct hmap *local_datapaths,
            struct ovsdb_idl_index *sbrec_meter_by_name,
+           const struct sbrec_ecmp_nexthop_table *enh_table,
            uint64_t req_cfg,
            bool lflows_changed,
-           bool pflows_changed)
+           bool pflows_changed,
+           struct tracked_acl_ids *tracked_acl_ids)
 {
     static bool skipped_last_time = false;
     static uint64_t old_req_cfg = 0;
@@ -2691,18 +2720,29 @@ ofctrl_put(struct ovn_desired_flow_table *lflow_table,
         }
     }
 
+    /* OpenFlow messages to send to the switch to bring it up-to-date. */
+    struct ovs_list msgs = OVS_LIST_INITIALIZER(&msgs);
+
+    if (local_datapaths) {
+        need_put |= ecmp_nexthop_monitor_run(enh_table, local_datapaths,
+                                             current_ct_zones, swconn, &msgs);
+    }
+
     if (!need_put) {
+        ovs_assert(ovs_list_is_empty(&msgs));
         VLOG_DBG("ofctrl_put not needed");
         return;
     }
     if (!ofctrl_can_put()) {
         VLOG_DBG("ofctrl_put can't be performed");
+
+        struct ofpbuf *msg;
+        LIST_FOR_EACH_POP (msg, list_node, &msgs) {
+            ofpbuf_delete(msg);
+        }
         skipped_last_time = true;
         return;
     }
-
-    /* OpenFlow messages to send to the switch to bring it up-to-date. */
-    struct ovs_list msgs = OVS_LIST_INITIALIZER(&msgs);
 
     /* Iterate through ct zones that need to be flushed. */
     struct shash_node *iter;
@@ -2901,12 +2941,16 @@ ofctrl_put(struct ovn_desired_flow_table *lflow_table,
         }
     }
 
+    acl_ids_flush_expired(tracked_acl_ids, rconn_get_version(swconn), &msgs);
+
     if (!ovs_list_is_empty(&msgs)) {
         /* Add a barrier to the list of messages. */
         struct ofpbuf *barrier = ofputil_encode_barrier_request(OFP15_VERSION);
         const struct ofp_header *oh = barrier->data;
         ovs_be32 xid_ = oh->xid;
         ovs_list_push_back(&msgs, &barrier->list_node);
+
+        acl_ids_record_barrier_xid(tracked_acl_ids, xid_);
 
         /* Queue the messages. */
         struct ofpbuf *msg;

@@ -1755,10 +1755,10 @@ tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd
 ])
 
 # Configure selection_fields.
-check ovn-nbctl set load_balancer $lb2_uuid selection_fields="ip_src,ip_dst,tp_src,tp_dst"
+check ovn-nbctl set load_balancer $lb2_uuid selection_fields="ipv6_src,ipv6_dst,tp_src,tp_dst"
 OVS_WAIT_UNTIL([
     test $(ovs-ofctl dump-groups br-int | \
-    grep "selection_method=hash,fields(ip_src,ip_dst,tcp_src,tcp_dst)" -c) -eq 2
+    grep "selection_method=hash,fields(ipv6_src,ipv6_dst,tcp_src,tcp_dst)" -c) -eq 2
 ])
 
 AT_CHECK([ovs-appctl dpctl/flush-conntrack])
@@ -1789,10 +1789,10 @@ done
 # there should be only one conntrack entry.
 AT_CHECK([test $(ovs-appctl dpctl/dump-conntrack | grep fd03::2 -c) -eq 1])
 
-check ovn-nbctl set load_balancer $lb2_uuid selection_fields="eth_src,ip_src"
+check ovn-nbctl set load_balancer $lb2_uuid selection_fields="eth_src,ipv6_src"
 OVS_WAIT_UNTIL([
     test $(ovs-ofctl dump-groups br-int | \
-    grep "selection_method=hash,fields(eth_src,ip_src)" -c) -eq 2
+    grep "selection_method=hash,fields(eth_src,ipv6_src)" -c) -eq 2
 ])
 
 AT_CHECK([ovs-appctl dpctl/flush-conntrack])
@@ -1831,6 +1831,253 @@ if [[ "$bar3_ct" == "20" ]]; then
 else
     AT_CHECK([test $bar3_ct -eq 0])
 fi
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([load-balancing - Dual Stack])
+AT_KEYWORDS([ovnlb])
+
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+
+# Set external-ids in br-int needed for ovn-controller.
+ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+check_uuid ovn-nbctl create Logical_Router name=R1
+check ovn-nbctl ls-add foo
+check ovn-nbctl ls-add bar
+
+# Connect foo to R1.
+check ovn-nbctl lrp-add R1 foo 00:00:01:01:02:03 192.168.1.1/24 fd01::1/64
+check ovn-nbctl lsp-add foo rp-foo -- set Logical_Switch_Port rp-foo \
+    type=router options:router-port=foo addresses=\"00:00:01:01:02:03\"
+
+# Connect bar to R1.
+check ovn-nbctl lrp-add R1 bar 00:00:01:01:02:04 172.16.1.1/24 fd02::1/64
+check ovn-nbctl lsp-add bar rp-bar -- set Logical_Switch_Port rp-bar \
+    type=router options:router-port=bar addresses=\"00:00:01:01:02:04\"
+
+# Create logical port 'foo1' in switch 'foo'.
+ADD_NAMESPACES(foo1)
+ADD_VETH(foo1, foo1, br-int, "192.168.1.2/24", "f0:00:00:01:02:03", \
+         "192.168.1.1")
+NS_EXEC([foo1],[ip addr add fd01::2/64 dev foo1 nodad])
+NS_EXEC([foo1],[ip -6 route add default via fd01::1])
+check ovn-nbctl lsp-add foo foo1 \
+-- lsp-set-addresses foo1 "f0:00:00:01:02:03 192.168.1.2 fd01::2"
+
+# Create logical ports 'bar1', 'bar2', 'bar3', 'bar6', 'bar7', 'bar8' in
+# switch 'bar'.
+ADD_NAMESPACES(bar1)
+ADD_VETH(bar1, bar1, br-int, "172.16.1.2/24", "f0:00:0f:01:02:03", \
+         "172.16.1.1")
+check ovn-nbctl lsp-add bar bar1 \
+-- lsp-set-addresses bar1 "f0:00:0f:01:02:03 172.16.1.2"
+
+ADD_NAMESPACES(bar2)
+ADD_VETH(bar2, bar2, br-int, "172.16.1.3/24", "f0:00:0f:01:02:04", \
+         "172.16.1.1")
+check ovn-nbctl lsp-add bar bar2 \
+-- lsp-set-addresses bar2 "f0:00:0f:01:02:04 172.16.1.3"
+
+ADD_NAMESPACES(bar3)
+ADD_VETH(bar3, bar3, br-int, "172.16.1.4/24", "f0:00:0f:01:02:05", \
+         "172.16.1.1")
+check ovn-nbctl lsp-add bar bar3 \
+-- lsp-set-addresses bar3 "f0:00:0f:01:02:05 172.16.1.4"
+
+ADD_NAMESPACES(bar6)
+ADD_VETH(bar6, bar6, br-int, "fd02::2/64", "f0:00:0f:02:02:03", \
+         "fd02::1", "nodad")
+check ovn-nbctl lsp-add bar bar6 \
+-- lsp-set-addresses bar6 "f0:00:0f:02:02:03 fd02::2"
+
+ADD_NAMESPACES(bar7)
+ADD_VETH(bar7, bar7, br-int, "fd02::3/64", "f0:00:0f:02:02:04", \
+         "fd02::1", "nodad")
+check ovn-nbctl lsp-add bar bar7 \
+-- lsp-set-addresses bar7 "f0:00:0f:02:02:04 fd02::3"
+
+ADD_NAMESPACES(bar8)
+ADD_VETH(bar8, bar8, br-int, "fd02::4/64", "f0:00:0f:02:02:05", \
+         "fd02::1", "nodad")
+check ovn-nbctl lsp-add bar bar8 \
+-- lsp-set-addresses bar8 "f0:00:0f:02:02:05 fd02::4"
+
+# Config OVN load-balancer with a VIP.
+check ovn-nbctl lb-add lb1 30.0.0.1:8080 "172.16.1.2:80,172.16.1.3:80,172.16.1.4:80"
+lb1_uuid=$(fetch_column nb:load_balancer _uuid name="lb1")
+check ovn-nbctl set load_balancer $lb1_uuid vips:'"[[fd03::2]]:8090"'='"@<:@fd02::2@:>@:80,@<:@fd02::3@:>@:80,@<:@fd02::4@:>@:80"'
+
+check ovn-nbctl ls-lb-add foo lb1
+
+# Wait for ovn-controller to catch up.
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL([ovs-ofctl -O OpenFlow13 dump-groups br-int | \
+grep 'nat(dst=172.16.1.4:80)'])
+
+# Start webservers in 'bar1', 'bar2' and 'bar3' for IPv4 connections.
+OVS_START_L7([bar1], [http])
+OVS_START_L7([bar2], [http])
+OVS_START_L7([bar3], [http])
+# Start webservers in 'bar6', 'bar7' and 'bar8' for IPv6 connections.
+OVS_START_L7([bar6], [http6])
+OVS_START_L7([bar7], [http6])
+OVS_START_L7([bar8], [http6])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack])
+
+dnl Test load-balancing that includes L4 ports in NAT.
+dnl Each server should have at least one connection.
+OVS_WAIT_FOR_OUTPUT([
+    for i in $(seq 1 20); do
+        NS_EXEC([foo1], [wget 30.0.0.1:8080 -t 5 -T 1 --retry-connrefused -v -o wget$i.log])
+    done
+    ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | \
+      sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.2,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.3,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.4,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+])
+
+OVS_WAIT_FOR_OUTPUT([
+# Test load-balancing that includes L4 ports in NAT.
+for i in $(seq 1 10); do
+    NS_EXEC([foo1], [wget http://[[fd03::2]]:8090 -t 5 -T 1 --retry-connrefused -v -o wget$i.log])
+done
+# Each server should have at least one connection.
+ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd03::2) | grep -v fe80 | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::2,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::3,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::4,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+])
+
+# Configure selection_fields.
+check ovn-nbctl set load_balancer $lb1_uuid selection_fields="ip_src,ip_dst,ipv6_src,ipv6_dst,tp_src,tp_dst"
+OVS_WAIT_UNTIL([
+    test $(ovs-ofctl dump-groups br-int | \
+    grep "selection_method=hash,fields(ip_src,ip_dst,ipv6_src,ipv6_dst,tcp_src,tcp_dst)" -c) -eq 2
+])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack])
+
+# Test load-balancing that includes L4 ports in NAT.
+# Each server should have at least one connection.
+OVS_WAIT_FOR_OUTPUT([
+    for i in $(seq 1 20); do
+        NS_EXEC([foo1], [wget 30.0.0.1:8080 -t 5 -T 1 --retry-connrefused -v -o wget$i.log])
+    done
+    ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | \
+      sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.2,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.3,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.4,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+])
+
+OVS_WAIT_FOR_OUTPUT([
+# Test load-balancing that includes L4 ports in NAT.
+for i in $(seq 1 10); do
+    NS_EXEC([foo1], [wget http://[[fd03::2]]:8090 -t 5 -T 1 --retry-connrefused -v -o wget$i.log])
+done
+# Each server should have at least one connection.
+ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd03::2) | grep -v fe80 | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::2,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::3,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::4,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+])
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack])
+
+echo "foo" > foo
+for i in $(seq 1 20); do
+    echo Request $i
+    NS_EXEC([foo1], [nc -p 30000 30.0.0.1 8080 < foo])
+done
+
+# Only one backend should be chosen.
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.2,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+])
+
+for i in $(seq 1 20); do
+    echo Request $i
+    NS_EXEC([foo1], [nc -6 -p 30000 fd03::2 8090 < foo])
+done
+
+# Only one backend should be chosen.
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd03::2) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+tcp,orig=(src=fd01::2,dst=fd03::2,sport=<cleared>,dport=<cleared>),reply=(src=fd02::2,dst=fd01::2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
+])
+
+# Test load-balancing using IP src and IP dst.
+check ovn-nbctl set load_balancer $lb1_uuid selection_fields="ip_src,ip_dst,ipv6_src,ipv6_dst"
+OVS_WAIT_UNTIL([
+    test $(ovs-ofctl dump-groups br-int | \
+    grep "selection_method=hash,fields(ip_src,ip_dst,ipv6_src,ipv6_dst)" -c) -eq 2
+])
+
+for p in $(seq 3 20); do
+    h=$(printf '%02x' $p)
+    NS_EXEC([foo1],[ip addr add 192.168.1.$p/24 dev foo1])
+    NS_EXEC([foo1],[ip addr add fd01::$h/64 dev foo1 nodad])
+done
+
+AT_CHECK([ovs-appctl dpctl/flush-conntrack])
+for p in $(seq 3 20); do
+    NS_EXEC([foo1], [nc -s 192.168.1.$p 30.0.0.1 8080 < foo])
+done
+
+bar1_ct=$(ovs-appctl dpctl/dump-conntrack | grep 172.16.1.2 -c)
+bar2_ct=$(ovs-appctl dpctl/dump-conntrack | grep 172.16.1.3 -c)
+bar3_ct=$(ovs-appctl dpctl/dump-conntrack | grep 172.16.1.4 -c)
+
+AT_CHECK([test $bar1_ct -gt 0])
+AT_CHECK([test $bar2_ct -gt 0])
+AT_CHECK([test $bar3_ct -gt 0])
+
+for p in $(seq 3 20); do
+    h=$(printf '%02x' $p)
+    NS_EXEC([foo1], [nc -6 -s fd01::$h fd03::2 8090 < foo])
+done
+
+bar1_ct=$(ovs-appctl dpctl/dump-conntrack | grep fd02::2 -c)
+bar2_ct=$(ovs-appctl dpctl/dump-conntrack | grep fd02::3 -c)
+bar3_ct=$(ovs-appctl dpctl/dump-conntrack | grep fd02::4 -c)
+
+AT_CHECK([test $bar1_ct -gt 0])
+AT_CHECK([test $bar2_ct -gt 0])
+AT_CHECK([test $bar3_ct -gt 0])
+
 OVS_APP_EXIT_AND_WAIT([ovn-controller])
 
 as ovn-sb
@@ -7150,6 +7397,11 @@ ovs-appctl dpctl/dump-flows
 # ACLs configured, the datapath flows for the packets from sw1-p1 will have
 # matches on ct_state and ct_label fields.
 # Since sw0 doesn't have any ACLs, there should be no match on ct fields.
+
+echo ""
+
+ovs-appctl dpctl/dump-flows | grep ct_state | grep -v ipv6
+
 AT_CHECK([ovs-appctl dpctl/dump-flows | grep ct_state | grep -v ipv6 -c], [1], [dnl
 0
 ])
@@ -8987,7 +9239,7 @@ OVS_WAIT_UNTIL([
 
 # The test could succeed thanks to a lucky northd recompute...after hitting too any flows
 # Double check we never hit error condition
-AT_CHECK([grep -qE 'Too many active mcast flows' northd/ovn-northd.log], [1])
+AT_CHECK([grep -qE 'Too many active IPv4 mcast flows' northd/ovn-northd.log], [1])
 
 OVS_APP_EXIT_AND_WAIT([ovn-controller])
 
@@ -14353,21 +14605,15 @@ OVN_POPULATE_ARP
 
 check ovn-nbctl --wait=hv sync
 
-cat > /etc/dhcp/dhcpd.conf <<EOF
+cat > dhcpd.conf <<EOF
 option dhcp-rebinding-time 10;
 option dhcp-renewal-time 5;
 subnet6 2001:db8:3333::/56 {
     prefix6 2001:db8:3333:100:: 2001:db8:3333:111:: /64;
 }
 EOF
-rm -f /var/lib/dhcp/dhcpd6.leases
-touch /var/lib/dhcp/dhcpd6.leases
-chown root:dhcpd /var/lib/dhcp /var/lib/dhcp/dhcpd6.leases
-chmod 775 /var/lib/dhcp
-chmod 664 /var/lib/dhcp/dhcpd6.leases
 
-NETNS_START_TCPDUMP([server], [-nni s1], [server])
-NETNS_DAEMONIZE([server], [dhcpd -6 -f s1 > dhcpd.log 2>&1], [dhcpd.pid])
+NETNS_START_DHCPD([server], [s1], [dhcpd.conf])
 check ovn-nbctl --wait=hv sync
 
 AT_CHECK([ovn-appctl debug/dump-peer-ports | sort], [0], [dnl
@@ -14402,6 +14648,205 @@ as
 OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
 /failed to query port patch-.*/d
 /.*terminating with signal 15.*/d"])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ACLs - persistent sessions])
+
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+
+ovs-vsctl set-fail-mode br-ext standalone
+# Set external-ids in br-int needed for ovn-controller
+ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+start_daemon ovn-controller
+
+# For this test, we want to ensure that established traffic
+# is allowed on ACLs when the persist-established option
+# is enabled.
+#
+# To start, we will set up allow-related ACLs.
+# We will send traffic and ensure it is allowed. Then we will adjust
+# the ACL so it no longer matches, and we will ensure that the traffic
+# is no longer allowed.
+#
+# Next, we will reset the ACL to its initial state, but we will also
+# change the ACL to have persist-established enabled.
+# We will flush conntrack, and rerun the test exactly as before.
+# The difference this time is that after we adjust the ACL so it no
+# longer matches, the traffic should still be allowed.
+
+check ovn-nbctl ls-add sw
+check ovn-nbctl lsp-add sw swp1 -- lsp-set-addresses swp1 "00:00:00:00:00:01 192.168.1.1"
+check ovn-nbctl lsp-add sw swp2 -- lsp-set-addresses swp2 "00:00:00:00:00:02 192.168.1.2"
+
+ADD_NAMESPACES(swp1)
+ADD_VETH(swp1, swp1, br-int, "192.168.1.1/24", "00:00:00:00:00:01")
+
+ADD_NAMESPACES(swp2)
+ADD_VETH(swp2, swp2, br-int, "192.168.1.2/24", "00:00:00:00:00:02")
+
+# Start a TCP server on swp2.
+NETNS_DAEMONIZE(swp2, [server.py -i 192.168.1.2 -p 10000], [server.pid])
+
+# Ensure TCP server is ready for connections
+OVS_WAIT_FOR_OUTPUT([cat output.txt], [0], [dnl
+Server Ready
+])
+: > output.txt
+
+# Make a FIFO and send its output to a client
+# from swp1
+mkfifo /tmp/myfifo
+on_exit 'rm -rf /tmp/myfifo'
+
+NETNS_DAEMONIZE(swp1, [client.py -f "/tmp/myfifo" -i 192.168.1.2 -p 10000], [client.pid])
+
+# First, ensure that we have basic connectivity before we even start setting
+# up ACLs.
+AT_CHECK([printf "test\n" > /tmp/myfifo], [0], [dnl
+])
+
+OVS_WAIT_FOR_OUTPUT([cat output.txt], [0], [dnl
+test
+])
+
+: > output.txt
+
+check ovn-nbctl acl-add sw from-lport 1000 'ip4.dst == 192.168.1.2' allow-related
+check ovn-nbctl acl-add sw from-lport 0 '1' drop
+
+# Do another basic connectivity check to ensure the ACL is allowing traffic as expected.
+AT_CHECK([printf "test\n" > /tmp/myfifo], [0], [dnl
+])
+
+OVS_WAIT_FOR_OUTPUT([cat output.txt], [0], [dnl
+test
+])
+
+: > output.txt
+
+# At this point, I need to adjust the ACL so it no longer matches. We then need
+# to ensure that the traffic does not pass. How we test this is...interesting. I'm
+# not sure how to test for a negative condition accurately.
+
+acl_uuid=$(fetch_column nb:ACL _uuid priority=1000)
+
+# Update the ACL so that it no longer matches our client-server traffic
+check ovn-nbctl set ACL $acl_uuid match="\"ip4.dst == 192.168.1.3\""
+
+# Send another packet from the client to the server.
+AT_CHECK([printf "test\n" > /tmp/myfifo], [0], [dnl
+])
+
+# The traffic should be blocked. We'll check the "drop" ACL to see if it has
+# been hit. We can't predict the number of packets that will be seen, but we know
+# it will be non-zero.
+lflow_table=$(ovn-debug lflow-stage-to-ltable ls_in_acl_eval)
+drop_acl_lflow_uuid=$(fetch_column Logical_Flow _uuid pipeline=ingress table_id=$lflow_table priority=1000 match="\"reg0[[9]] == 1 && (1)\"")
+drop_acl_cookie=$(ovn-debug uuid-to-cookie $drop_acl_lflow_uuid)
+
+OVS_WAIT_FOR_OUTPUT([ovs-ofctl dump-flows br-int | grep "cookie=$drop_acl_cookie" | grep -c "n_packets=[[1-9]][[0-9]]*"], [0], [dnl
+1
+])
+
+# And just to be safe, let's make sure the output file is still empty
+AT_CHECK([cat output.txt], [0], [dnl
+])
+
+# Reset the client and server processes so that we create a new connection
+client_pid=$(cat client.pid)
+server_pid=$(cat server.pid)
+kill $server_pid
+kill $client_pid
+OVS_WAIT_WHILE([kill -0 $server_pid 2>/dev/null])
+OVS_WAIT_WHILE([kill -0 $client_pid 2>/dev/null])
+
+NETNS_DAEMONIZE(swp2, [server.py -i 192.168.1.2 -p 20000], [server.pid])
+
+# Ensure TCP server is ready for connections
+OVS_WAIT_FOR_OUTPUT([cat output.txt], [0], [dnl
+Server Ready
+])
+: > output.txt
+
+NETNS_DAEMONIZE(swp1, [client.py -f "/tmp/myfifo" -i 192.168.1.2 -p 20000], [client.pid])
+
+# Now we'll re-set the ACL to allow the traffic.
+check ovn-nbctl set ACL $acl_uuid match="\"ip4.dst == 192.168.1.2\""
+
+# We'll also enable persist-established.
+check ovn-nbctl --wait=hv set ACL $acl_uuid options:persist-established=true
+
+# Make sure traffic passes
+AT_CHECK([printf "test\n" > /tmp/myfifo], [0], [dnl
+])
+
+OVS_WAIT_FOR_OUTPUT([cat output.txt], [0], [dnl
+test
+])
+
+: > output.txt
+
+# Get the ID for this ACL
+acl_id=$(ovn-sbctl get ACL_ID $acl_uuid id)
+acl_id=$(printf %x $acl_id)
+
+OVS_WAIT_FOR_OUTPUT([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(192.168.1.2) | \
+grep "labels=0x"$acl_id"00000000000000000000" | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' | \
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | \
+sed -e 's/labels=0x[[0-9a-f]]*/labels=<cleared>/'], [0], [dnl
+tcp,orig=(src=192.168.1.1,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=192.168.1.1,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=<cleared>,protoinfo=(state=<cleared>)
+])
+
+# Adjust the ACL so that it no longer matches
+check ovn-nbctl set ACL $acl_uuid match="\"ip4.dst == 192.168.1.3\""
+
+# Traffic should still pass
+AT_CHECK([printf "test\n" > /tmp/myfifo], [0], [dnl
+])
+
+OVS_WAIT_FOR_OUTPUT([cat output.txt], [0], [dnl
+test
+])
+
+: > output.txt
+
+# Now remove the ACL. This should remove the conntrack entry as well.
+check ovn-nbctl --wait=hv acl-del sw from-lport 1000 'ip4.dst == 192.168.1.3'
+
+OVS_WAIT_FOR_OUTPUT([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(192.168.1.2) | \
+grep "labels=0x"$acl_id"00000000000000000000" | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/connection dropped.*/d"])
+
 AT_CLEANUP
 ])
 
@@ -14859,6 +15304,2110 @@ OVS_APP_EXIT_AND_WAIT([ovn-northd])
 as
 OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
 /connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([neighbor_responder for all])
+AT_KEYWORDS([neighbor_responder])
+AT_SKIP_IF([test "$HAVE_ARPING" = no])
+
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+
+# Set external-ids in br-int needed for ovn-controller
+check ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller
+start_daemon ovn-controller
+
+check_uuid ovn-nbctl create Logical_Router name=lr options:chassis=hv1
+check ovn-nbctl ls-add ls
+
+# Connect alice to R2
+check ovn-nbctl lrp-add lr lr-ls 00:00:02:01:02:03 192.168.1.254/24
+check ovn-nbctl lsp-add ls ls-lr -- set Logical_Switch_Port ls-lr \
+    type=router options:router-port=lr-ls addresses=\"00:00:02:01:02:03\"
+
+# Logical port 'foo' in switch 'foo'.
+ADD_NAMESPACES(foo)
+ADD_VETH(foo, foo, br-int, "192.168.1.1/24", "f0:00:00:01:02:03", \
+         "192.168.1.254")
+check ovn-nbctl lsp-add ls foo \
+-- lsp-set-addresses foo "f0:00:00:01:02:03 192.168.1.1"
+
+check ovn-nbctl lb-add lb0 192.168.1.100 192.168.1.1
+check ovn-nbctl lr-lb-add lr lb0
+check ovn-nbctl lb-add lb1 172.16.1.100 192.168.1.1
+check ovn-nbctl lr-lb-add lr lb1
+
+NS_CHECK_EXEC([foo], [ip route add 172.16.1.100 dev foo])
+
+check ovn-nbctl set load_balancer lb0 options:neighbor_responder=all
+check ovn-nbctl set load_balancer lb1 options:neighbor_responder=all
+check ovn-nbctl --wait=hv sync
+
+NS_CHECK_EXEC([foo], [arping -q -c 3 192.168.1.100])
+NS_CHECK_EXEC([foo], [arping -q -c 3 172.16.1.100])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ECMP Flush CT entries - IPv4])
+AT_KEYWORDS([ecmp])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-int])
+ADD_BR([br-ext])
+ADD_BR([br-ecmp])
+
+check ovs-ofctl add-flow br-ext action=normal
+check ovs-ofctl add-flow br-ecmp action=normal
+# Set external-ids in br-int needed for ovn-controller
+check ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller
+start_daemon ovn-controller
+check ovs-vsctl set Open_vSwitch . external-ids:arp-nd-max-timeout-sec=1
+
+check ovn-nbctl set nb_global . options:ecmp_nexthop_monitor_enable="true"
+
+check ovn-nbctl lr-add R1
+check ovn-nbctl set logical_router R1 options:chassis=hv1
+check ovn-nbctl lr-add R2
+check ovn-nbctl set logical_router R2 options:chassis=hv1
+
+check ovn-nbctl ls-add sw0
+check ovn-nbctl ls-add sw1
+check ovn-nbctl ls-add public
+
+check ovn-nbctl lrp-add R1 rp-sw0 00:00:01:01:02:03 192.168.1.1/24
+check ovn-nbctl lrp-add R1 rp-public1 00:00:02:01:02:03 172.16.1.1/24
+
+check ovn-nbctl lrp-add R2 rp-sw1 00:00:03:01:02:03 192.168.2.1/24
+check ovn-nbctl lrp-add R2 rp-public2 00:00:04:01:02:03 172.16.1.5/24
+
+check ovn-nbctl lsp-add sw0 sw0-rp -- set Logical_Switch_Port sw0-rp \
+    type=router options:router-port=rp-sw0 \
+    -- lsp-set-addresses sw0-rp router
+
+check ovn-nbctl lsp-add sw1 sw1-rp -- set Logical_Switch_Port sw1-rp \
+    type=router options:router-port=rp-sw1 \
+    -- lsp-set-addresses sw1-rp router
+
+check ovn-nbctl lsp-add public public-rp1 -- set Logical_Switch_Port public-rp1 \
+    type=router options:router-port=rp-public1 \
+    -- lsp-set-addresses public-rp1 router
+
+check ovn-nbctl lsp-add public public-rp2 -- set Logical_Switch_Port public-rp2 \
+    type=router options:router-port=rp-public2 \
+    -- lsp-set-addresses public-rp2 router
+
+ADD_NAMESPACES(alice)
+ADD_VETH(alice, alice, br-int, "192.168.1.2/24", "f0:00:00:01:02:03", \
+         "192.168.1.1")
+check ovn-nbctl lsp-add sw0 alice \
+    -- lsp-set-addresses alice "f0:00:00:01:02:03 192.168.1.2"
+
+ADD_NAMESPACES(peter)
+ADD_VETH(peter, peter, br-int, "192.168.2.2/24", "f0:00:02:01:02:03", \
+         "192.168.2.1")
+check ovn-nbctl lsp-add sw1 peter \
+    -- lsp-set-addresses peter "f0:00:02:01:02:03 192.168.2.2"
+
+check ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext
+check ovn-nbctl lsp-add public public1 \
+        -- lsp-set-addresses public1 unknown \
+        -- lsp-set-type public1 localnet \
+        -- lsp-set-options public1 network_name=phynet
+
+ADD_NAMESPACES(ecmp-path0)
+ADD_VETH(ecmp-p01, ecmp-path0, br-ext, "172.16.1.2/24", "f0:00:00:01:02:04", "172.16.1.1")
+ADD_VETH(ecmp-p02, ecmp-path0, br-ecmp, "172.16.2.2/24", "f0:00:00:01:03:04")
+
+ADD_NAMESPACES(ecmp-path1)
+ADD_VETH(ecmp-p11, ecmp-path1, br-ext, "172.16.1.3/24", "f0:00:00:01:02:05", "172.16.1.1")
+ADD_VETH(ecmp-p12, ecmp-path1, br-ecmp, "172.16.2.3/24", "f0:00:00:01:03:05")
+
+NS_CHECK_EXEC([ecmp-path0], [sysctl -w net.ipv4.conf.all.forwarding=1],[0], [dnl
+net.ipv4.conf.all.forwarding = 1
+])
+NS_CHECK_EXEC([ecmp-path1], [sysctl -w net.ipv4.conf.all.forwarding=1],[0], [dnl
+net.ipv4.conf.all.forwarding = 1
+])
+
+ADD_NAMESPACES(bob)
+ADD_VETH(bob, bob, br-ecmp, "172.16.2.10/24", "f0:00:00:01:02:06", "172.16.2.2")
+
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 172.16.2.0/24 172.16.1.2
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 172.16.2.0/24 172.16.1.3
+
+wait_for_ports_up
+check ovn-nbctl --wait=hv sync
+NETNS_DAEMONIZE([alice], [nc -l -k 80], [alice.pid])
+NETNS_DAEMONIZE([peter], [nc -l -k 80], [peter.pid])
+
+NS_CHECK_EXEC([bob], [ping -q -c 3 -i 0.3 -w 2 192.168.1.2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -z 192.168.1.2 80], [0])
+
+wait_row_count ECMP_Nexthop 2
+wait_column 'f0:00:00:01:02:04' ECMP_Nexthop mac nexthop='172.16.1.2'
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='172.16.1.3'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmp,orig=(src=172.16.2.10,dst=192.168.1.2,id=<cleared>,type=8,code=0),reply=(src=192.168.1.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000
+tcp,orig=(src=172.16.2.10,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000,protoinfo=(state=<cleared>)
+])
+
+# Change bob default IP address
+NS_CHECK_EXEC([bob], [ip route del 0.0.0.0/0 via 172.16.2.2])
+NS_CHECK_EXEC([bob], [ip route add 0.0.0.0/0 via 172.16.2.3])
+
+NS_CHECK_EXEC([bob], [ping -q -c 3 -i 0.3 -w 2 192.168.1.2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -z 192.168.1.2 80], [0])
+
+wait_row_count ECMP_Nexthop 2
+check_column 'f0:00:00:01:02:04' ECMP_Nexthop mac nexthop='172.16.1.2'
+check_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='172.16.1.3'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmp,orig=(src=172.16.2.10,dst=192.168.1.2,id=<cleared>,type=8,code=0),reply=(src=192.168.1.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000
+icmp,orig=(src=172.16.2.10,dst=192.168.1.2,id=<cleared>,type=8,code=0),reply=(src=192.168.1.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000
+tcp,orig=(src=172.16.2.10,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000,protoinfo=(state=<cleared>)
+tcp,orig=(src=172.16.2.10,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000,protoinfo=(state=<cleared>)
+])
+
+# Remove first ECMP route
+check ovn-nbctl lr-route-del  R1 172.16.2.0/24 172.16.1.2
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 1
+check_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='172.16.1.3'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmp,orig=(src=172.16.2.10,dst=192.168.1.2,id=<cleared>,type=8,code=0),reply=(src=192.168.1.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000
+tcp,orig=(src=172.16.2.10,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000,protoinfo=(state=<cleared>)
+])
+
+# Add the route back and verify we do not flush if we have multiple next-hops with the same mac address
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 172.16.2.0/24 172.16.1.2
+wait_row_count ECMP_Nexthop 2
+wait_column 'f0:00:00:01:02:04' ECMP_Nexthop mac nexthop='172.16.1.2'
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='172.16.1.3'
+
+NS_CHECK_EXEC([ecmp-path0], [ip link set dev ecmp-p01 address f0:00:00:01:02:05])
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='172.16.1.2'
+
+# Change bob default IP address
+NS_CHECK_EXEC([bob], [ip route del 0.0.0.0/0 via 172.16.2.3])
+NS_CHECK_EXEC([bob], [ip route add 0.0.0.0/0 via 172.16.2.2])
+
+NS_CHECK_EXEC([bob], [ping -q -c 3 -i 0.3 -w 2 192.168.1.2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -z 192.168.1.2 80], [0])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmp,orig=(src=172.16.2.10,dst=192.168.1.2,id=<cleared>,type=8,code=0),reply=(src=192.168.1.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000
+tcp,orig=(src=172.16.2.10,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000,protoinfo=(state=<cleared>)
+])
+
+# Remove first ECMP route
+check ovn-nbctl lr-route-del R1 172.16.2.0/24 172.16.1.2
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 1
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+])
+
+# Remove second ECMP route
+check ovn-nbctl lr-route-del R1
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 0
+
+NS_CHECK_EXEC([ecmp-path0], [ip link set dev ecmp-p01 address f0:00:00:01:02:06])
+
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 172.16.2.0/24 172.16.1.2
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 172.16.2.0/24 172.16.1.3
+
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R2 172.16.2.0/24 172.16.1.2
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R2 172.16.2.0/24 172.16.1.3
+
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 4
+
+NS_CHECK_EXEC([ecmp-path0], [ip route add 192.168.2.2/32 via 172.16.1.5])
+NS_CHECK_EXEC([ecmp-path1], [ip route add 192.168.2.2/32 via 172.16.1.5])
+
+NS_CHECK_EXEC([bob], [ping -q -c 3 -i 0.3 -w 2 192.168.1.2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -z 192.168.1.2 80], [0])
+
+NS_CHECK_EXEC([bob], [ping -q -c 3 -i 0.3 -w 2 192.168.2.2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -z 192.168.2.2 80], [0])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmp,orig=(src=172.16.2.10,dst=192.168.1.2,id=<cleared>,type=8,code=0),reply=(src=192.168.1.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000
+icmp,orig=(src=172.16.2.10,dst=192.168.2.2,id=<cleared>,type=8,code=0),reply=(src=192.168.2.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000
+tcp,orig=(src=172.16.2.10,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.1.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000,protoinfo=(state=<cleared>)
+tcp,orig=(src=172.16.2.10,dst=192.168.2.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.2.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000,protoinfo=(state=<cleared>)
+])
+
+check ovn-nbctl lr-route-del R1
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 2
+wait_column 'f0:00:00:01:02:06' ECMP_Nexthop mac nexthop='172.16.1.2'
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='172.16.1.3'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmp,orig=(src=172.16.2.10,dst=192.168.2.2,id=<cleared>,type=8,code=0),reply=(src=192.168.2.2,dst=172.16.2.10,id=<cleared>,type=0,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000
+tcp,orig=(src=172.16.2.10,dst=192.168.2.2,sport=<cleared>,dport=<cleared>),reply=(src=192.168.2.2,dst=172.16.2.10,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000,protoinfo=(state=<cleared>)
+])
+
+check ovn-nbctl lr-route-del R2
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 0
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
+/.*terminating with signal 15.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ECMP Flush CT entries - IPv6])
+AT_KEYWORDS([ecmp])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-int])
+ADD_BR([br-ext])
+ADD_BR([br-ecmp])
+
+check ovs-ofctl add-flow br-ext action=normal
+check ovs-ofctl add-flow br-ecmp action=normal
+# Set external-ids in br-int needed for ovn-controller
+check ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller
+start_daemon ovn-controller
+check ovs-vsctl set Open_vSwitch . external-ids:arp-nd-max-timeout-sec=1
+
+check ovn-nbctl set nb_global . options:ecmp_nexthop_monitor_enable="true"
+
+check ovn-nbctl lr-add R1
+check ovn-nbctl set logical_router R1 options:chassis=hv1
+check ovn-nbctl lr-add R2
+check ovn-nbctl set logical_router R2 options:chassis=hv1
+
+check ovn-nbctl ls-add sw0
+check ovn-nbctl ls-add sw1
+check ovn-nbctl ls-add public
+
+check ovn-nbctl lrp-add R1 rp-sw0 00:00:01:01:02:03 fd11::1/64
+check ovn-nbctl lrp-add R1 rp-public1 00:00:02:01:02:03 fd12::1/64
+
+check ovn-nbctl lrp-add R2 rp-sw1 00:00:03:01:02:03 fd14::1/64
+check ovn-nbctl lrp-add R2 rp-public2 00:00:04:01:02:03 fd12::5/64
+
+check ovn-nbctl lsp-add sw0 sw0-rp -- set Logical_Switch_Port sw0-rp \
+    type=router options:router-port=rp-sw0 \
+    -- lsp-set-addresses sw0-rp router
+
+check ovn-nbctl lsp-add sw1 sw1-rp -- set Logical_Switch_Port sw1-rp \
+    type=router options:router-port=rp-sw1 \
+    -- lsp-set-addresses sw1-rp router
+
+check ovn-nbctl lsp-add public public-rp1 -- set Logical_Switch_Port public-rp1 \
+    type=router options:router-port=rp-public1 \
+    -- lsp-set-addresses public-rp1 router
+
+check ovn-nbctl lsp-add public public-rp2 -- set Logical_Switch_Port public-rp2 \
+    type=router options:router-port=rp-public2 \
+    -- lsp-set-addresses public-rp2 router
+
+ADD_NAMESPACES(alice)
+ADD_VETH(alice, alice, br-int, "fd11::2/64", "f0:00:00:01:02:03", "fd11::1", "nodad")
+check ovn-nbctl lsp-add sw0 alice -- lsp-set-addresses alice "f0:00:00:01:02:03 fd11::2"
+
+ADD_NAMESPACES(peter)
+ADD_VETH(peter, peter, br-int, "fd14::2/64", "f0:00:02:01:02:03", "fd14::1", "nodad")
+check ovn-nbctl lsp-add sw1 peter -- lsp-set-addresses peter "f0:00:02:01:02:03 fd14::2"
+
+check ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext
+check ovn-nbctl lsp-add public public1 \
+        -- lsp-set-addresses public1 unknown \
+        -- lsp-set-type public1 localnet \
+        -- lsp-set-options public1 network_name=phynet
+
+ADD_NAMESPACES(ecmp-path0)
+ADD_VETH(ecmp-p01, ecmp-path0, br-ext, "fd12::2/64", "f0:00:00:01:02:04", "fd12::1", "nodad")
+ADD_VETH(ecmp-p02, ecmp-path0, br-ecmp, "fd13::2/64", "f0:00:00:01:03:04")
+OVS_WAIT_UNTIL([NS_EXEC([ecmp-path0], [ip a show dev ecmp-p02 | grep "fe80::" | grep -v tentative])])
+
+ADD_NAMESPACES(ecmp-path1)
+ADD_VETH(ecmp-p11, ecmp-path1, br-ext, "fd12::3/64", "f0:00:00:01:02:05", "fd12::1", "nodad")
+ADD_VETH(ecmp-p12, ecmp-path1, br-ecmp, "fd13::3/64", "f0:00:00:01:03:05")
+OVS_WAIT_UNTIL([NS_EXEC([ecmp-path1], [ip a show dev ecmp-p12 | grep "fe80::" | grep -v tentative])])
+
+ADD_NAMESPACES(bob)
+ADD_VETH(bob, bob, br-ecmp, "fd13::a/64", "f0:00:00:01:02:06", "fd13::2", "nodad")
+
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 fd13::/64 fd12::2
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 fd13::/64 fd12::3
+
+NS_CHECK_EXEC([ecmp-path0], [sysctl -w net.ipv6.conf.all.forwarding=1],[0], [dnl
+net.ipv6.conf.all.forwarding = 1
+])
+NS_CHECK_EXEC([ecmp-path1], [sysctl -w net.ipv6.conf.all.forwarding=1],[0], [dnl
+net.ipv6.conf.all.forwarding = 1
+])
+
+check ovn-nbctl --wait=hv sync
+NETNS_DAEMONIZE([alice], [nc -6 -l -k 80], [alice.pid])
+NETNS_DAEMONIZE([peter], [nc -6 -l -k 80], [peter.pid])
+
+NS_CHECK_EXEC([bob], [ping6 -q -c 3 -i 0.3 -w 2 fd11::2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+NS_CHECK_EXEC([bob], [nc -6 -z fd11::2 80], [0])
+
+wait_row_count ECMP_Nexthop 2
+wait_column 'f0:00:00:01:02:04' ECMP_Nexthop mac nexthop='"fd12::2"'
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='"fd12::3"'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmpv6,orig=(src=fd13::a,dst=fd11::2,id=<cleared>,type=128,code=0),reply=(src=fd11::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000
+tcp,orig=(src=fd13::a,dst=fd11::2,sport=<cleared>,dport=<cleared>),reply=(src=fd11::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000,protoinfo=(state=<cleared>)
+])
+
+# Change bob default IP address
+NS_CHECK_EXEC([bob], [ip -6 route del ::/0 via fd13::2])
+NS_CHECK_EXEC([bob], [ip -6 route add ::/0 via fd13::3])
+
+NS_CHECK_EXEC([bob], [ping -6 -q -c 3 -i 0.3 -w 2 fd11::2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -6 -z fd11::2 80], [0])
+
+wait_row_count ECMP_Nexthop 2
+check_column 'f0:00:00:01:02:04' ECMP_Nexthop mac nexthop='"fd12::2"'
+check_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='"fd12::3"'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmpv6,orig=(src=fd13::a,dst=fd11::2,id=<cleared>,type=128,code=0),reply=(src=fd11::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000
+icmpv6,orig=(src=fd13::a,dst=fd11::2,id=<cleared>,type=128,code=0),reply=(src=fd11::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000
+tcp,orig=(src=fd13::a,dst=fd11::2,sport=<cleared>,dport=<cleared>),reply=(src=fd11::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020400000000,protoinfo=(state=<cleared>)
+tcp,orig=(src=fd13::a,dst=fd11::2,sport=<cleared>,dport=<cleared>),reply=(src=fd11::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000,protoinfo=(state=<cleared>)
+])
+
+# Remove first ECMP route
+check ovn-nbctl lr-route-del R1 fd13::/64 fd12::2
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 1
+check_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='"fd12::3"'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmpv6,orig=(src=fd13::a,dst=fd11::2,id=<cleared>,type=128,code=0),reply=(src=fd11::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000
+tcp,orig=(src=fd13::a,dst=fd11::2,sport=<cleared>,dport=<cleared>),reply=(src=fd11::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000,protoinfo=(state=<cleared>)
+])
+
+ Add the route back and verify we do not flush if we have multiple next-hops with the same mac address
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 fd13::/64 fd12::2
+wait_row_count ECMP_Nexthop 2
+wait_column 'f0:00:00:01:02:04' ECMP_Nexthop mac nexthop='"fd12::2"'
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='"fd12::3"'
+#
+NS_CHECK_EXEC([ecmp-path0], [ip link set dev ecmp-p01 address f0:00:00:01:02:05])
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='"fd12::2"'
+
+# Change bob default IP address
+NS_CHECK_EXEC([bob], [ip -6 route del ::/0 via fd13::3])
+NS_CHECK_EXEC([bob], [ip -6 route add ::/0 via fd13::2])
+
+NS_CHECK_EXEC([bob], [ping -6 -q -c 3 -i 0.3 -w 2 fd11::2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -6 -z fd11::2 80], [0])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmpv6,orig=(src=fd13::a,dst=fd11::2,id=<cleared>,type=128,code=0),reply=(src=fd11::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000
+tcp,orig=(src=fd13::a,dst=fd11::2,sport=<cleared>,dport=<cleared>),reply=(src=fd11::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020500000000,protoinfo=(state=<cleared>)
+])
+
+# Remove first ECMP route
+check ovn-nbctl lr-route-del R1 fd13::/64 fd12::2
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 1
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+])
+
+# Remove second ECMP route
+check ovn-nbctl lr-route-del R1
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 0
+
+NS_CHECK_EXEC([ecmp-path0], [ip link set dev ecmp-p01 address f0:00:00:01:02:06])
+
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 fd13::/64 fd12::2
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R1 fd13::/64 fd12::3
+
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R2 fd13::/64 fd12::2
+check ovn-nbctl --ecmp-symmetric-reply lr-route-add R2 fd13::/64 fd12::3
+
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 4
+
+NS_CHECK_EXEC([ecmp-path0], [ip route add fd14::2/128 via fd12::5])
+NS_CHECK_EXEC([ecmp-path1], [ip route add fd14::2/128 via fd12::5])
+
+NS_CHECK_EXEC([bob], [ping -6 -q -c 3 -i 0.3 -w 2 fd11::2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -6 -z fd11::2 80], [0])
+
+NS_CHECK_EXEC([bob], [ping -6 -q -c 3 -i 0.3 -w 2 fd14::2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+NS_CHECK_EXEC([bob], [nc -6 -z fd14::2 80], [0])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmpv6,orig=(src=fd13::a,dst=fd11::2,id=<cleared>,type=128,code=0),reply=(src=fd11::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000
+icmpv6,orig=(src=fd13::a,dst=fd14::2,id=<cleared>,type=128,code=0),reply=(src=fd14::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000
+tcp,orig=(src=fd13::a,dst=fd11::2,sport=<cleared>,dport=<cleared>),reply=(src=fd11::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000,protoinfo=(state=<cleared>)
+tcp,orig=(src=fd13::a,dst=fd14::2,sport=<cleared>,dport=<cleared>),reply=(src=fd14::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000,protoinfo=(state=<cleared>)
+])
+
+# Remove second ECMP route
+check ovn-nbctl lr-route-del R1
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 2
+wait_column 'f0:00:00:01:02:06' ECMP_Nexthop mac nexthop='"fd12::2"'
+wait_column 'f0:00:00:01:02:05' ECMP_Nexthop mac nexthop='"fd12::3"'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fd13::a) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+icmpv6,orig=(src=fd13::a,dst=fd14::2,id=<cleared>,type=128,code=0),reply=(src=fd14::2,dst=fd13::a,id=<cleared>,type=129,code=0),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000
+tcp,orig=(src=fd13::a,dst=fd14::2,sport=<cleared>,dport=<cleared>),reply=(src=fd14::2,dst=fd13::a,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=<cleared>,labels=0xf0000001020600000000,protoinfo=(state=<cleared>)
+])
+
+check ovn-nbctl lr-route-del R2
+check ovn-nbctl --wait=hv sync
+wait_row_count ECMP_Nexthop 0
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(172.16.2.10) | \
+sed -e 's/zone=[[0-9]]*/zone=<cleared>/' |
+sed -e 's/mark=[[0-9]]*/mark=<cleared>/' | sort], [0], [dnl
+])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
+/.*terminating with signal 15.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - DGP])
+
+VRF_RESERVE([1337])
+VRF_RESERVE([1338])
+
+# This test uses dynamic routing on a simulated multi-tenant internet
+# connection.
+# Tenant 1 (pr1, p1, vif1) is connected to the internet via NAT on pr1.
+# Tenant 2 (pr2, p2, vif2) is connected to the internet via routing.
+# The connections of pr1 and pr2 to public are using DGPs.
+# The connection from internet to phys is also using a DGP.
+# The LR internet is running dynamic-routing.
+# The LS phys is assumed to be used for peering with a router outside OVN.
+#
+#
+# +----+       +----+
+# |vif1|       |vif2|
+# +--+-+       +--+-+
+#    |            |
+# +--+--+      +--+--+
+# |LS p1|      |LS p2|
+# +--+--+      +--+--+
+#    |            |
+# +--+---+     +--+---+
+# |LR pr1|     |LR pr2|
+# +-----++     ++-----+
+#       |       |
+#      ++-------++
+#      |LS public|
+#      +-----+---+
+#            |
+#      +-----+-----+
+#      |LR internet|
+#      +-----+-----+
+#            |
+#        +---+---+
+#        |LS phys|
+#        +-------+
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-int])
+ADD_BR([br-ext])
+
+check ovs-ofctl add-flow br-ext action=normal
+# Set external-ids in br-int needed for ovn-controller.
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+# LS setup.
+
+check ovn-nbctl ls-add public
+check ovn-nbctl ls-add phys
+check ovn-nbctl ls-add p1
+check ovn-nbctl ls-add p2
+
+# LR internet setup.
+
+check ovn-nbctl lr-add internet \
+    -- set Logical_Router internet options:dynamic-routing=true \
+                                   options:requested-tnl-key=1337
+
+check ovn-nbctl lrp-add internet internet-public \
+        00:00:02:01:02:03 192.0.2.1/24 \
+    -- set Logical_Router_Port internet-public \
+            options:dynamic-routing-redistribute="connected,static"
+check ovn-nbctl lsp-add public public-internet \
+    -- set Logical_Switch_Port public-internet type=router \
+            options:router-port=internet-public \
+    -- lsp-set-addresses public-internet router
+
+check ovn-nbctl lrp-add internet internet-phys \
+        00:00:ff:00:00:01 192.168.10.1/24 \
+    -- set Logical_Router_Port internet-phys \
+            options:dynamic-routing-maintain-vrf=true
+check ovn-nbctl lrp-set-gateway-chassis internet-phys hv1
+check ovn-nbctl lsp-add phys phys-internet \
+    -- set Logical_Switch_Port phys-internet type=router \
+            options:router-port=internet-phys \
+    -- lsp-set-addresses phys-internet router
+
+# LR pr1 setup.
+
+check ovn-nbctl lr-add pr1 \
+    -- set Logical_Router pr1 options:requested-tnl-key=1338
+
+check ovn-nbctl lrp-add pr1 pr1-public \
+        00:00:02:01:02:04 192.0.2.2/24
+check ovn-nbctl lrp-set-gateway-chassis pr1-public hv1
+check ovn-nbctl lsp-add public public-pr1 \
+    -- set Logical_Switch_Port public-pr1 type=router \
+            options:router-port=pr1-public \
+    -- lsp-set-addresses public-pr1 router
+
+check ovn-nbctl lrp-add pr1 pr1-p1 \
+        00:00:03:00:00:01 10.0.0.1/24
+check ovn-nbctl lsp-add p1 p1-pr1 \
+    -- set Logical_Switch_Port p1-pr1 type=router \
+            options:router-port=pr1-p1 \
+    -- lsp-set-addresses p1-pr1 router
+
+check ovn-nbctl lr-route-add pr1 0.0.0.0/0 192.0.2.1
+
+# LR pr2 setup.
+
+check ovn-nbctl lr-add pr2 \
+    -- set Logical_Router pr2 options:requested-tnl-key=1339
+
+check ovn-nbctl lrp-add pr2 pr2-public \
+        00:00:02:01:02:05 192.0.2.3/24
+check ovn-nbctl lrp-set-gateway-chassis pr2-public hv1
+check ovn-nbctl lsp-add public public-pr2 \
+    -- set Logical_Switch_Port public-pr2 type=router \
+            options:router-port=pr2-public \
+    -- lsp-set-addresses public-pr2 router
+
+check ovn-nbctl lrp-add pr2 pr2-p2 \
+        00:00:04:00:00:01 198.51.100.1/24
+check ovn-nbctl lsp-add p2 p2-pr2 \
+    -- set Logical_Switch_Port p2-pr2 type=router \
+            options:router-port=pr2-p2 \
+    -- lsp-set-addresses p2-pr2 router
+
+check ovn-nbctl lr-route-add pr2 0.0.0.0/0 192.0.2.1
+
+# Setup lsp "vif1" with NAT.
+check ovn-nbctl lsp-add p1 vif1 \
+    -- lsp-set-addresses vif1 "00:00:ff:ff:ff:01 10.0.0.2"
+check ovn-nbctl lr-nat-add pr1 dnat_and_snat 192.0.2.10 10.0.0.2
+
+# Setup lsp "vif2" with a static route on LR internet.
+check ovn-nbctl lsp-add p2 vif2 \
+    -- lsp-set-addresses vif2 "00:00:ff:ff:ff:02 198.51.100.10"
+check ovn-nbctl lr-route-add internet 198.51.100.0/24 192.0.2.3
+
+# Configure external connectivity.
+check ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext
+check ovn-nbctl lsp-add phys phys1 \
+    -- lsp-set-addresses phys1 unknown \
+    -- lsp-set-type phys1 localnet \
+    -- lsp-set-options phys1 network_name=phynet
+
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up public-internet phys-internet public-pr1 p1-pr1 public-pr2 p2-pr2
+
+# Now the ovn-controller should have setup a vrf named "ovnvrf1337".
+# It should contain routes for:
+# * 192.0.2.0/24
+# * 198.51.100.0/24
+
+AT_CHECK([ip vrf show ovnvrf1337], [0], [dnl
+ovnvrf1337 1337
+])
+
+# "ip route list" output has a trailing space on each line.
+# The awk magic removes all trailing spaces.
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.0/24 proto 84 metric 1000
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# We now switch to announcing host routes and expect 192.0.2.0/24 to be gone
+# and the following to be added:
+# * 192.0.2.1/32
+# * 192.0.2.2/32
+# * 192.0.2.3/32
+# * 192.0.2.10/32
+# The last 3 of them are local to the current chassis so we expect a better
+# prio.
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-public \
+    options:dynamic-routing-redistribute="connected-as-host,static"
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 1000
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# If the pr1-public lrp is now removed from this hypervisor the route metric
+# will go back to the default.
+# For this we just schedule it on a non existing chassis.
+check ovn-nbctl lrp-del-gateway-chassis pr1-public hv1
+check ovn-nbctl --wait=hv lrp-set-gateway-chassis pr1-public hv123
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 1000
+blackhole 192.0.2.2 proto 84 metric 1000
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 1000
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# Moving pr1-public back will also change the route metrics again.
+check ovn-nbctl lrp-del-gateway-chassis pr1-public hv123
+check ovn-nbctl --wait=hv lrp-set-gateway-chassis pr1-public hv1
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 1000
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# Disable maintaining the vrf as some tests below would cause the vrfs to be
+# removed.
+check ovn-nbctl set Logical_Router_Port internet-phys \
+    options:dynamic-routing-maintain-vrf=false
+
+# Now we test route learning.
+check_row_count Learned_Route 0
+check ip route add 233.252.0.0/24 via 192.168.10.10 dev lo onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 1
+lp=$(fetch_column port_binding _uuid logical_port=internet-phys)
+check_row_count Learned_Route 1 logical_port=$lp ip_prefix=233.252.0.0/24 nexthop=192.168.10.10
+
+# If we remove the route it is also gone.
+check ip route del 233.252.0.0/24 via 192.168.10.10 dev lo onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 0
+
+# By setting a learning interface filter will prevent us from learning the
+# route again. The Port referenced by the name does not even exist.
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+      options:dynamic-routing-port-name=thisportdoesnotexist
+check ip route add 233.252.0.0/24 via 192.168.10.10 dev lo onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 0
+
+# Setting the local ovsdb to map this port to "lo" will make route learning
+# work again.
+check ovs-vsctl set Open_vSwitch . \
+    external-ids:dynamic-routing-port-mapping="thisisirrelevant=andjustfortesting,thisportdoesnotexist=lo"
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 1
+
+# Now we try the interface filter with an existing port.
+check ovn-nbctl lsp-add phys mylearninglsp
+check ovs-vsctl -- add-port br-int hv1-mll -- \
+    set interface hv1-mll type=internal external-ids:iface-id=mylearninglsp
+check ip link set hv1-mll up
+wait_for_ports_up mylearninglsp
+
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+      options:dynamic-routing-port-name=mylearninglsp
+
+check ip route add 233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 1 ip_prefix=233.253.0.0/24 nexthop=192.168.20.20
+
+# Stopping the ovn-controller will clean up the route entries created by it.
+# We first need to unset dynamic-routing-maintain-vrf as otherwise it will
+# delete the whole vrf.
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+                             options:dynamic-routing-maintain-vrf=false
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+AT_CHECK([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [0], [dnl
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink
+])
+
+# Starting it again will add the routes again.
+start_daemon ovn-controller
+OVS_WAIT_UNTIL([test "$(ovn-appctl -t ovn-controller debug/status)" == "running"])
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 1000
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink])
+
+# Changing the vrf name will switch to the new one.
+# The old vrf will be removed.
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+    options:dynamic-routing-maintain-vrf=true
+check ovn-nbctl --wait=hv set Logical_Router internet \
+    options:dynamic-routing-vrf-name=ovnvrf1338
+AT_CHECK([ip vrf | grep -q ovnvrf1337], [1], [])
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1338 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 1000
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink])
+
+# Stoping with --restart will not touch the routes.
+check ovn-appctl -t ovn-controller exit --restart
+OVS_WAIT_UNTIL([test "$(ovn-appctl -t ovn-controller debug/status)" != "running"])
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1338 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 1000
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink])
+
+# When we now stop the ovn-controller it will remove the VRF.
+start_daemon ovn-controller
+OVS_WAIT_UNTIL([test "$(ovn-appctl -t ovn-controller debug/status)" == "running"])
+check ovn-nbctl --wait=hv sync
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+AT_CHECK([ip vrf | grep -q ovnvrf1338], [1], [])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
+/.*terminating with signal 15.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - Gateway Router])
+
+VRF_RESERVE([1337])
+
+# This test uses dynamic routing on a simulated multi-tenant internet
+# connection.
+# Tenant 1 (pr1, p1, vif1) is connected to the internet via NAT on pr1.
+# Tenant 2 (pr2, p2, vif2) is connected to the internet via routing.
+# The connections of pr1 and pr2 to public are using DGPs.
+# The LR internet is a gateway router.
+# The LR internet is running dynamic-routing.
+# The LS phys is assumed to be used for peering with a router outside OVN.
+#
+#
+# +----+       +----+
+# |vif1|       |vif2|
+# +--+-+       +--+-+
+#    |            |
+# +--+--+      +--+--+
+# |LS p1|      |LS p2|
+# +--+--+      +--+--+
+#    |            |
+# +--+---+     +--+---+
+# |LR pr1|     |LR pr2|
+# +-----++     ++-----+
+#       |       |
+#      ++-------++
+#      |LS public|
+#      +-----+---+
+#            |
+#      +-----+-----+
+#      |LR internet|
+#      +-----+-----+
+#            |
+#        +---+---+
+#        |LS phys|
+#        +-------+
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-int])
+ADD_BR([br-ext])
+
+check ovs-ofctl add-flow br-ext action=normal
+# Set external-ids in br-int needed for ovn-controller.
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+# LS setup.
+
+check ovn-nbctl ls-add public
+check ovn-nbctl ls-add phys
+check ovn-nbctl ls-add p1
+check ovn-nbctl ls-add p2
+
+# LR internet setup.
+
+check ovn-nbctl lr-add internet \
+    -- set Logical_Router internet options:dynamic-routing=true \
+                                   options:requested-tnl-key=1337 \
+                                   options:chassis=hv1
+
+check ovn-nbctl lrp-add internet internet-public \
+        00:00:02:01:02:03 192.0.2.1/24 \
+    -- set Logical_Router_Port internet-public \
+            options:dynamic-routing-redistribute="connected,static" \
+            options:dynamic-routing-port-name=wedontlearnstuffhere
+check ovn-nbctl lsp-add public public-internet \
+    -- set Logical_Switch_Port public-internet type=router \
+            options:router-port=internet-public \
+    -- lsp-set-addresses public-internet router
+
+check ovn-nbctl lrp-add internet internet-phys \
+        00:00:ff:00:00:01 192.168.10.1/24 \
+    -- set Logical_Router_Port internet-phys \
+            options:dynamic-routing-maintain-vrf=true
+check ovn-nbctl lsp-add phys phys-internet \
+    -- set Logical_Switch_Port phys-internet type=router \
+            options:router-port=internet-phys \
+    -- lsp-set-addresses phys-internet router
+
+# LR pr1 setup.
+
+check ovn-nbctl lr-add pr1 \
+    -- set Logical_Router pr1 options:requested-tnl-key=1338
+
+check ovn-nbctl lrp-add pr1 pr1-public \
+        00:00:02:01:02:04 192.0.2.2/24
+check ovn-nbctl lrp-set-gateway-chassis pr1-public hv1
+check ovn-nbctl lsp-add public public-pr1 \
+    -- set Logical_Switch_Port public-pr1 type=router \
+            options:router-port=pr1-public \
+    -- lsp-set-addresses public-pr1 router
+
+check ovn-nbctl lrp-add pr1 pr1-p1 \
+        00:00:03:00:00:01 10.0.0.1/24
+check ovn-nbctl lsp-add p1 p1-pr1 \
+    -- set Logical_Switch_Port p1-pr1 type=router \
+            options:router-port=pr1-p1 \
+    -- lsp-set-addresses p1-pr1 router
+
+check ovn-nbctl lr-route-add pr1 0.0.0.0/0 192.0.2.1
+
+# LR pr2 setup.
+
+check ovn-nbctl lr-add pr2 \
+    -- set Logical_Router pr2 options:requested-tnl-key=1339
+
+check ovn-nbctl lrp-add pr2 pr2-public \
+        00:00:02:01:02:05 192.0.2.3/24
+check ovn-nbctl lrp-set-gateway-chassis pr2-public hv1
+check ovn-nbctl lsp-add public public-pr2 \
+    -- set Logical_Switch_Port public-pr2 type=router \
+            options:router-port=pr2-public \
+    -- lsp-set-addresses public-pr2 router
+
+check ovn-nbctl lrp-add pr2 pr2-p2 \
+        00:00:04:00:00:01 198.51.100.1/24
+check ovn-nbctl lsp-add p2 p2-pr2 \
+    -- set Logical_Switch_Port p2-pr2 type=router \
+            options:router-port=pr2-p2 \
+    -- lsp-set-addresses p2-pr2 router
+
+check ovn-nbctl lr-route-add pr2 0.0.0.0/0 192.0.2.1
+
+# Setup lsp "vif1" with NAT.
+check ovn-nbctl lsp-add p1 vif1 \
+    -- lsp-set-addresses vif1 "00:00:ff:ff:ff:01 10.0.0.2"
+check ovn-nbctl lr-nat-add pr1 dnat_and_snat 192.0.2.10 10.0.0.2
+
+# Setup lsp "vif2" with a static route on LR internet.
+check ovn-nbctl lsp-add p2 vif2 \
+    -- lsp-set-addresses vif2 "00:00:ff:ff:ff:02 198.51.100.10"
+check ovn-nbctl lr-route-add internet 198.51.100.0/24 192.0.2.3
+        .ovnsb_idl = re->sb_idl,
+
+# Configure external connectivity.
+check ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext
+check ovn-nbctl lsp-add phys phys1 \
+    -- lsp-set-addresses phys1 unknown \
+    -- lsp-set-type phys1 localnet \
+    -- lsp-set-options phys1 network_name=phynet
+
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up public-internet phys-internet public-pr1 p1-pr1 public-pr2 p2-pr2
+
+# Now the ovn-controller should have setup a vrf named "ovnvrf1337".
+# It should contain routes for:
+# * 192.0.2.0/24
+# * 198.51.100.0/24
+
+AT_CHECK([ip vrf show ovnvrf1337], [0], [dnl
+ovnvrf1337 1337
+])
+
+# "ip route list" output has a trailing space on each line.
+# The awk magic removes all trailing spaces.
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.0/24 proto 84 metric 1000
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# We now switch to announcing host routes and expect 192.0.2.0/24 to be gone
+# and the following to be added:
+# * 192.0.2.1/32
+# * 192.0.2.2/32
+# * 192.0.2.3/32
+# * 192.0.2.10/32
+# The last 3 of them are local to the current chassis so we expect a better
+# prio.
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-public \
+    options:dynamic-routing-redistribute="connected-as-host,static"
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 100
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# If the pr1-public lrp is now removed from this hypervisor the route metric
+# will go back to the default.
+# For this we just schedule it on a non existing chassis.
+check ovn-nbctl lrp-del-gateway-chassis pr1-public hv1
+check ovn-nbctl --wait=hv lrp-set-gateway-chassis pr1-public hv123
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 100
+blackhole 192.0.2.2 proto 84 metric 1000
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 1000
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# Moving pr1-public back will also change the route metrics again.
+check ovn-nbctl lrp-del-gateway-chassis pr1-public hv123
+check ovn-nbctl --wait=hv lrp-set-gateway-chassis pr1-public hv1
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 100
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000])
+
+# Disable maintaining the vrf as some tests below would cause the vrfs to be
+# removed.
+check ovn-nbctl set Logical_Router_Port internet-phys \
+    options:dynamic-routing-maintain-vrf=false
+
+# Now we test route learning.
+check_row_count Learned_Route 0
+check ip route add 233.252.0.0/24 via 192.168.10.10 dev lo onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 1
+lp=$(fetch_column port_binding _uuid logical_port=internet-phys)
+check_row_count Learned_Route 1 logical_port=$lp ip_prefix=233.252.0.0/24 nexthop=192.168.10.10
+
+# If we remove the route it is also gone.
+check ip route del 233.252.0.0/24 via 192.168.10.10 dev lo onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 0
+
+# By setting a learning interface filter will prevent us from learning the
+# route again. The Port referenced by the name does not even exist.
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+    options:dynamic-routing-port-name=thisportdoesnotexist
+check ip route add 233.252.0.0/24 via 192.168.10.10 dev lo onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 0
+
+# Setting the local ovsdb to map this port to "lo" will make route learning
+# work again.
+check ovs-vsctl set Open_vSwitch . \
+    external-ids:dynamic-routing-port-mapping="thisisirrelevant=andjustfortesting,thisportdoesnotexist=lo"
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 1
+
+# Now we try the interface filter with an existing port.
+check ovn-nbctl lsp-add phys mylearninglsp
+check ovs-vsctl -- add-port br-int hv1-mll -- \
+    set interface hv1-mll type=internal external-ids:iface-id=mylearninglsp
+check ip link set hv1-mll up
+wait_for_ports_up mylearninglsp
+
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+    options:dynamic-routing-port-name=mylearninglsp
+
+check ip route add 233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink vrf ovnvrf1337
+check ovn-nbctl --wait=hv sync
+check_row_count Learned_Route 1 ip_prefix=233.253.0.0/24 nexthop=192.168.20.20
+
+# Stopping the ovn-controller will clean up the route entries created by it.
+# We first need to unset dynamic-routing-maintain-vrf as otherwise it will
+# delete the whole vrf
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+                             options:dynamic-routing-maintain-vrf=false
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+AT_CHECK([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [0], [dnl
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink
+])
+
+# Starting it again will add the routes again.
+start_daemon ovn-controller
+OVS_WAIT_UNTIL([test "$(ovn-appctl -t ovn-controller debug/status)" == "running"])
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 100
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink])
+
+# Stoping with --restart will not touch the routes.
+check ovn-appctl -t ovn-controller exit --restart
+OVS_WAIT_UNTIL([test "$(ovn-appctl -t ovn-controller debug/status)" != "running"])
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf1337 | awk '{$1=$1};1'], [dnl
+blackhole 192.0.2.1 proto 84 metric 100
+blackhole 192.0.2.2 proto 84 metric 100
+blackhole 192.0.2.3 proto 84 metric 100
+blackhole 192.0.2.10 proto 84 metric 100
+blackhole 198.51.100.0/24 proto 84 metric 1000
+233.252.0.0/24 via 192.168.10.10 dev lo onlink
+233.253.0.0/24 via 192.168.20.20 dev hv1-mll onlink])
+
+# Now we set maintain-vrf again and stop the ovn-controller.
+# It will then remove the VRF.
+start_daemon ovn-controller
+OVS_WAIT_UNTIL([test "$(ovn-appctl -t ovn-controller debug/status)" == "running"])
+check ovn-nbctl --wait=hv set Logical_Router_Port internet-phys \
+        options:dynamic-routing-maintain-vrf=true
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+AT_CHECK([ip vrf | grep -q ovnvrf1337], [1], [])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
+/.*terminating with signal 15.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - LB VIPs on gateway router IPv4])
+AT_KEYWORDS([dynamic-routing])
+
+CHECK_VRF()
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+
+vrf=1000
+VRF_RESERVE([$vrf])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-ext], [set Bridge br-ext fail-mode=standalone])
+
+# Set external-ids in br-int needed for ovn-controller.
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+OVS_WAIT_WHILE([ip link | grep -q ovnvrf$vrf:.*UP])
+
+check ovn-nbctl                                             \
+    -- lr-add R1                                            \
+    -- set Logical_Router R1                                \
+            options:requested-tnl-key=$vrf                  \
+            options:dynamic-routing=true                    \
+    -- ls-add sw0                                           \
+    -- ls-add public                                        \
+    -- lrp-add R1 rp-sw0 00:00:01:01:02:03 192.168.1.1/24   \
+    -- lrp-add R1 rp-public 00:00:02:01:02:03 172.16.1.1/24 \
+    -- lrp-set-options rp-public                            \
+            dynamic-routing-maintain-vrf=true               \
+            dynamic-routing-redistribute=lb                 \
+    -- set logical_router R1 options:chassis=hv1            \
+    -- lsp-add sw0 sw0-rp                                   \
+    -- set Logical_Switch_Port sw0-rp type=router           \
+            options:router-port=rp-sw0                      \
+    -- lsp-set-addresses sw0-rp router                      \
+    -- lsp-add public public-rp                             \
+    -- set Logical_Switch_Port public-rp type=router        \
+            options:router-port=rp-public                   \
+    -- lsp-set-addresses public-rp router                   \
+    -- lsp-add public public1                               \
+    -- lsp-set-addresses public1 unknown                    \
+    -- lsp-set-type public1 localnet                        \
+    -- lsp-set-options public1 network_name=phynet
+
+OVN_POPULATE_ARP
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up
+
+AT_CHECK([test `ip route show table $vrf | wc -l` -eq 1], [1])
+
+# Create a load balancer and associate to R1.
+check ovn-nbctl                                   \
+    -- lb-add lb1 172.16.1.150:80 172.16.1.100:80 \
+    -- lr-lb-add R1 lb1
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 172.16.1.150 proto 84 metric 1000])
+
+# Add distributed router connected through "join" LS and ensure
+# that its LB VIPs are redistributed by R1. LS join has no
+# IP config, routers reach each other over IPv6 LLAs.
+check ovn-nbctl \
+    -- remove Logical_Router_Port rp-public                    \
+            options dynamic-routing-redistribute               \
+    -- lrp-add R1 r1-join 00:00:00:00:ff:02                    \
+    -- lrp-set-options r1-join dynamic-routing-redistribute=lb \
+    -- ls-add ls-join                                          \
+    -- lsp-add ls-join lsp-join-to-r1                          \
+    -- lsp-set-type lsp-join-to-r1 router                      \
+    -- lsp-set-options lsp-join-to-r1 router-port=r1-join      \
+    -- lsp-set-addresses lsp-join-to-r1 router                 \
+    -- lr-add R2                                               \
+    -- lrp-add R2 r2-join 00:00:00:00:fe:02                    \
+    -- lsp-add ls-join lsp-join-to-r2                          \
+    -- lsp-set-type lsp-join-to-r2 router                      \
+    -- lsp-set-options lsp-join-to-r2 router-port=r2-join      \
+    -- lrp-set-gateway-chassis r2-join hv1
+
+# Create a load balancer and associate to R2.
+check ovn-nbctl                                    \
+    -- lb-add lb2 10.42.10.10:80 192.168.123.10:80 \
+    -- lr-lb-add R2 lb2
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 10.42.10.10 proto 84 metric 100
+blackhole 172.16.1.150 proto 84 metric 1000])
+
+# Move DGW of R2 to another chassis to verify that route priority decreases.
+check ovn-nbctl                              \
+    -- lrp-del-gateway-chassis r2-join hv1   \
+    -- lrp-set-gateway-chassis r2-join hv123
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 10.42.10.10 proto 84 metric 1000
+blackhole 172.16.1.150 proto 84 metric 1000])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+# Ensure system resources are cleaned up.
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP], [1])
+AT_CHECK([test `ip route show table $vrf | wc -l` -eq 1], [1])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/Failed to acquire.*/d
+/connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - LB VIPs on gateway router IPv6])
+AT_KEYWORDS([dynamic-routing])
+
+CHECK_VRF()
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+
+vrf=1001
+VRF_RESERVE([$vrf])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-ext], [set Bridge br-ext fail-mode=standalone])
+
+# Set external-ids in br-int needed for ovn-controller.
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+OVS_WAIT_WHILE([ip link | grep -q ovnvrf$vrf:.*UP])
+
+check ovn-nbctl                                                   \
+    -- lr-add R1                                                  \
+    -- set Logical_Router R1                                      \
+            options:requested-tnl-key=$vrf                        \
+            options:dynamic-routing=true                          \
+    -- ls-add sw0                                                 \
+    -- ls-add public                                              \
+    -- lrp-add R1 rp-sw0 00:00:01:01:02:03 2001:db8:100::1/64     \
+    -- lrp-add R1 rp-public 00:00:02:01:02:03 2001:db8:1001::1/64 \
+    -- lrp-set-options rp-public                                  \
+            dynamic-routing-maintain-vrf=true                     \
+            dynamic-routing-redistribute=lb                       \
+    -- set logical_router R1 options:chassis=hv1                  \
+    -- lsp-add sw0 sw0-rp                                         \
+    -- set Logical_Switch_Port sw0-rp type=router                 \
+            options:router-port=rp-sw0                            \
+    -- lsp-set-addresses sw0-rp router                            \
+    -- lsp-add public public-rp                                   \
+    -- set Logical_Switch_Port public-rp type=router              \
+            options:router-port=rp-public                         \
+    -- lsp-set-addresses public-rp router                         \
+    -- lsp-add public public1                                     \
+    -- lsp-set-addresses public1 unknown                          \
+    -- lsp-set-type public1 localnet                              \
+    -- lsp-set-options public1 network_name=phynet
+
+OVN_POPULATE_ARP
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up
+
+
+AT_CHECK([test `ip -6 route show table $vrf | wc -l` -eq 1], [1])
+
+# Create a load balancer and associate to R1.
+check ovn-nbctl                                                       \
+    -- lb-add lb1 [[2001:db8:1001::150]]:80 [[2001:db8:2001::100]]:80 \
+    -- lr-lb-add R1 lb1
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf1001:.*UP])
+AT_CHECK([test `ip -6 route show table 1001 | wc -l` -eq 1])
+
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1001::150 dev lo proto 84 metric 1000 pref medium])
+
+# Add distributed router connected through "join" LS and ensure
+# that its LB VIPs are redistributed by R1. LS join has no
+# IP config, routers reach each other over IPv6 LLAs
+check ovn-nbctl \
+    -- remove Logical_Router_Port rp-public                    \
+            options dynamic-routing-redistribute               \
+    -- lrp-add R1 r1-join 00:00:00:00:ff:02                    \
+    -- lrp-set-options r1-join dynamic-routing-redistribute=lb \
+    -- ls-add ls-join                                          \
+    -- lsp-add ls-join lsp-join-to-r1                          \
+    -- lsp-set-type lsp-join-to-r1 router                      \
+    -- lsp-set-options lsp-join-to-r1 router-port=r1-join      \
+    -- lsp-set-addresses lsp-join-to-r1 router                 \
+    -- lr-add R2                                               \
+    -- lrp-add R2 r2-join 00:00:00:00:fe:02                    \
+    -- lsp-add ls-join lsp-join-to-r2                          \
+    -- lsp-set-type lsp-join-to-r2 router                      \
+    -- lsp-set-options lsp-join-to-r2 router-port=r2-join      \
+    -- lrp-set-gateway-chassis r2-join hv1
+
+# Create a load balancer and associate to R2.
+check ovn-nbctl                                                       \
+    -- lb-add lb2 [[2001:db8:3001::150]]:80 [[2001:db8:4001::100]]:80 \
+    -- lr-lb-add R2 lb2
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1001::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:3001::150 dev lo proto 84 metric 100 pref medium])
+
+# Move DGW of R2 to another chassis to verify that route priority decreases.
+check ovn-nbctl                              \
+    -- lrp-del-gateway-chassis r2-join hv1   \
+    -- lrp-set-gateway-chassis r2-join hv123
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1001::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:3001::150 dev lo proto 84 metric 1000 pref medium])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+# Ensure system resources are cleaned up.
+AT_CHECK([ip link | grep -q ovnvrf1001:.*UP], [1])
+AT_CHECK([test `ip -6 route show table 1001 | wc -l` -eq 1], [1])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/Failed to acquire.*/d
+/connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - DNAT and DNAT_AND_SNAT on gateway router IPv4])
+AT_KEYWORDS([dynamic-routing])
+
+CHECK_VRF()
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+
+vrf=1002
+VRF_RESERVE([$vrf])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-ext], [set Bridge br-ext fail-mode=standalone])
+
+# Set external-ids in br-int needed for ovn-controller.
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+OVS_WAIT_WHILE([ip link | grep -q ovnvrf$vrf:.*UP])
+
+check ovn-nbctl                                             \
+    -- lr-add R1                                            \
+    -- set Logical_Router R1                                \
+            options:requested-tnl-key=$vrf                  \
+            options:dynamic-routing=true                    \
+    -- ls-add sw0                                           \
+    -- ls-add public                                        \
+    -- lrp-add R1 rp-sw0 00:00:01:01:02:03 192.168.1.1/24   \
+    -- lrp-add R1 rp-public 00:00:02:01:02:03 172.16.1.1/24 \
+    -- lrp-set-options rp-public                            \
+           dynamic-routing-maintain-vrf=true                \
+           dynamic-routing-redistribute=nat                 \
+    -- set logical_router R1 options:chassis=hv1            \
+    -- lsp-add sw0 sw0-rp                                   \
+    -- set Logical_Switch_Port sw0-rp type=router           \
+            options:router-port=rp-sw0                      \
+    -- lsp-set-addresses sw0-rp router                      \
+    -- lsp-add public public-rp                             \
+    -- set Logical_Switch_Port public-rp type=router        \
+            options:router-port=rp-public                   \
+    -- lsp-set-addresses public-rp router                   \
+    -- lsp-add public public1                               \
+    -- lsp-set-addresses public1 unknown                    \
+    -- lsp-set-type public1 localnet                        \
+    -- lsp-set-options public1 network_name=phynet
+
+OVN_POPULATE_ARP
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up
+
+AT_CHECK([test `ip route show table $vrf | wc -l` -eq 2], [1])
+
+# Create dnat_and_snat, dnat rules in R1.
+check ovn-nbctl                                             \
+    -- lr-nat-add R1 dnat_and_snat 172.16.1.10 192.168.1.10 \
+    -- lr-nat-add R1 dnat 172.16.1.11 192.168.1.11
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 172.16.1.10 proto 84 metric 1000
+blackhole 172.16.1.11 proto 84 metric 1000])
+
+# Add distributed router connected through "join" LS and ensure
+# that its external NAT IPs are redistributed by R1. LS join has no
+# IP config, routers reach each other over IPv6 LLAs.
+check ovn-nbctl                                                 \
+    -- remove Logical_Router_Port rp-public                     \
+            options dynamic-routing-redistribute                \
+    -- lrp-add R1 r1-join 00:00:00:00:ff:02                     \
+    -- lrp-set-options r1-join dynamic-routing-redistribute=nat \
+    -- ls-add ls-join                                           \
+    -- lsp-add ls-join lsp-join-to-r1                           \
+    -- lsp-set-type lsp-join-to-r1 router                       \
+    -- lsp-set-options lsp-join-to-r1 router-port=r1-join       \
+    -- lsp-set-addresses lsp-join-to-r1 router                  \
+    -- lr-add R2                                                \
+    -- lrp-add R2 r2-join 00:00:00:00:fe:02                     \
+    -- lsp-add ls-join lsp-join-to-r2                           \
+    -- lsp-set-type lsp-join-to-r2 router                       \
+    -- lsp-set-options lsp-join-to-r2 router-port=r2-join       \
+    -- ha-chassis-group-add g1                                  \
+    -- ha-chassis-group-add-chassis g1 hv1 10
+
+group_uuid=$(fetch_column nb:HA_Chassis_Group _uuid name=g1)
+check ovn-nbctl set logical_router_port r2-join ha_chassis_group="$group_uuid"
+
+# Create valid NATs on R2 (these should be advertised).
+check ovn-nbctl --gateway-port r2-join \
+    lr-nat-add R2 dnat_and_snat 10.42.10.10 192.168.1.10
+check ovn-nbctl --gateway-port r2-join \
+    lr-nat-add R2 dnat_and_snat 10.42.10.11 192.168.1.11
+
+# Create NATs without explicit gateway_port set on R2 (these should not be
+# advertised when multiple DGPs are configured because the configuration is
+# invalid / ambiguous in that case).
+check ovn-nbctl \
+    lr-nat-add R2 dnat_and_snat 10.42.10.12 192.168.1.12
+check ovn-nbctl \
+    lr-nat-add R2 dnat_and_snat 10.42.10.13 192.168.1.13
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 10.42.10.10 proto 84 metric 100
+blackhole 10.42.10.11 proto 84 metric 100
+blackhole 10.42.10.12 proto 84 metric 100
+blackhole 10.42.10.13 proto 84 metric 100
+blackhole 172.16.1.10 proto 84 metric 1000
+blackhole 172.16.1.11 proto 84 metric 1000])
+
+# Move DGW of R2 to another chassis to verify that route priority decreases.
+check ovn-nbctl                             \
+  -- ha-chassis-group-add-chassis g1 hv2 20 \
+  -- ha-chassis-group-remove-chassis g1 hv1
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 10.42.10.10 proto 84 metric 1000
+blackhole 10.42.10.11 proto 84 metric 1000
+blackhole 10.42.10.12 proto 84 metric 1000
+blackhole 10.42.10.13 proto 84 metric 1000
+blackhole 172.16.1.10 proto 84 metric 1000
+blackhole 172.16.1.11 proto 84 metric 1000])
+
+# Add "guest" LS connected the distributed router R2 and one "VM" called
+# guest1.
+# Also, connect R2 to ls-join via another DGW.
+check ovn-nbctl                                                     \
+    -- lrp-add R2 r2-guest 00:00:00:00:fd:02 192.168.2.1/24         \
+    -- lrp-add R2 r2-join-dgw2 00:00:00:00:fd:02                    \
+    -- lsp-add ls-join lsp-join-to-r2-dgw2                          \
+    -- lsp-set-type lsp-join-to-r2-dgw2 router                      \
+    -- lsp-set-options lsp-join-to-r2-dgw2 router-port=r2-join-dgw2 \
+    -- ls-add ls-guest                                              \
+    -- lsp-add ls-guest lsp-guest-to-r2                             \
+    -- lsp-set-type lsp-guest-to-r2 router                          \
+    -- lsp-set-options lsp-guest-to-r2 router-port=r2-guest         \
+    -- lsp-set-addresses lsp-guest-to-r2 router                     \
+    -- lsp-add ls-guest guest1                                      \
+    -- lsp-set-addresses guest1 '00:00:00:00:fc:03 192.168.2.10'
+
+check ovn-nbctl \
+    -- set logical_router_port r2-join-dgw2 ha_chassis_group="$group_uuid"
+check ovn-nbctl --wait=hv sync
+
+# Bind guest1 on hv1.
+ADD_NAMESPACES(guest1)
+ADD_VETH(guest1, guest1, br-int, "192.168.2.10/24", "00:00:00:00:fd:03", \
+         "192.168.2.1")
+
+# Add distributed NAT on R2 for guest1 and ensure that it's advertised
+# with better metric on chassis hv1 even when DGP for R2 is elsewhere.
+check ovn-nbctl                                              \
+    --gateway-port r2-join-dgw2 --add-route                  \
+        lr-nat-add R2 dnat_and_snat 10.42.20.11 192.168.2.10 \
+        guest1 00:00:00:00:fc:04
+check ovn-nbctl --wait=hv sync
+
+# At this point, because R2 has multiple DGPs the NAT rules for
+# 10.42.10.12 and 10.42.10.13 have become invalid so ovn shouldn't
+# advertise them anymore.
+
+OVS_WAIT_UNTIL_EQUAL([ip route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 10.42.10.10 proto 84 metric 1000
+blackhole 10.42.10.11 proto 84 metric 1000
+blackhole 10.42.20.11 proto 84 metric 100
+blackhole 172.16.1.10 proto 84 metric 1000
+blackhole 172.16.1.11 proto 84 metric 1000])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+# Ensure system resources are cleaned up.
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP], [1])
+AT_CHECK([test `ip route show table $vrf | wc -l` -eq 1], [1])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/Failed to acquire.*/d
+/connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - DNAT and DNAT_AND_SNAT on gateway router IPv6])
+AT_KEYWORDS([dynamic-routing])
+
+CHECK_VRF()
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+
+vrf=1003
+VRF_RESERVE([$vrf])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-ext], [set Bridge br-ext fail-mode=standalone])
+
+# Set external-ids in br-int needed for ovn-controller.
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller.
+start_daemon ovn-controller
+
+OVS_WAIT_WHILE([ip link | grep -q ovnvrf$vrf:.*UP])
+
+check ovn-nbctl                                                   \
+    -- lr-add R1                                                  \
+    -- set Logical_Router R1                                      \
+            options:requested-tnl-key=$vrf                        \
+            options:dynamic-routing=true                          \
+    -- ls-add sw0                                                 \
+    -- ls-add public                                              \
+    -- lrp-add R1 rp-sw0 00:00:01:01:02:03 2001:db8:100::1/64     \
+    -- lrp-add R1 rp-public 00:00:02:01:02:03 2001:db8:1003::1/64 \
+    -- lrp-set-options rp-public                                  \
+           dynamic-routing-maintain-vrf=true                      \
+           dynamic-routing-redistribute=nat                       \
+    -- set logical_router R1 options:chassis=hv1                  \
+    -- lsp-add sw0 sw0-rp                                         \
+    -- set Logical_Switch_Port sw0-rp type=router                 \
+            options:router-port=rp-sw0                            \
+    -- lsp-set-addresses sw0-rp router                            \
+    -- lsp-add public public-rp                                   \
+    -- set Logical_Switch_Port public-rp type=router              \
+            options:router-port=rp-public                         \
+    -- lsp-set-addresses public-rp router                         \
+    -- lsp-add public public1                                     \
+    -- lsp-set-addresses public1 unknown                          \
+    -- lsp-set-type public1 localnet                              \
+    -- lsp-set-options public1 network_name=phynet
+
+OVN_POPULATE_ARP
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up
+
+AT_CHECK([test `ip -6 route show table $vrf | wc -l` -eq 2], [1])
+
+# Create dnat_and_snat, dnat rules in R1.
+check ovn-nbctl                                                         \
+    -- lr-nat-add R1 dnat_and_snat 2001:db8:1003::150 2001:db8:100::100 \
+    -- lr-nat-add R1 dnat 2001:db8:1003::151 2001:db8:100::100
+
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1003::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1003::151 dev lo proto 84 metric 1000 pref medium])
+
+# Add distributed router connected through "join" LS and ensure
+# that its external NAT IPs are redistributed by R1. LS join has no
+# IP config, routers reach each other over IPv6 LLAs.
+check ovn-nbctl                                                 \
+    -- remove Logical_Router_Port rp-public                     \
+            options dynamic-routing-redistribute                \
+    -- lrp-add R1 r1-join 00:00:00:00:ff:02                     \
+    -- lrp-set-options r1-join dynamic-routing-redistribute=nat \
+    -- ls-add ls-join                                           \
+    -- lsp-add ls-join lsp-join-to-r1                           \
+    -- lsp-set-type lsp-join-to-r1 router                       \
+    -- lsp-set-options lsp-join-to-r1 router-port=r1-join       \
+    -- lsp-set-addresses lsp-join-to-r1 router                  \
+    -- lr-add R2                                                \
+    -- lrp-add R2 r2-join 00:00:00:00:fe:02                     \
+    -- lsp-add ls-join lsp-join-to-r2                           \
+    -- lsp-set-type lsp-join-to-r2 router                       \
+    -- lsp-set-options lsp-join-to-r2 router-port=r2-join       \
+    -- ha-chassis-group-add g1                                  \
+    -- ha-chassis-group-add-chassis g1 hv1 10
+
+group_uuid=$(fetch_column nb:HA_Chassis_Group _uuid name=g1)
+check ovn-nbctl set logical_router_port r2-join ha_chassis_group="$group_uuid"
+
+# Create valid NATs on R2 (these should be advertised).
+check ovn-nbctl --gateway-port r2-join \
+    lr-nat-add R2 dnat_and_snat 2001:db8:1004::150 2001:db8:201::100
+check ovn-nbctl --gateway-port r2-join \
+    lr-nat-add R2 dnat 2001:db8:1004::151 2001:db8:201::101
+
+# Create NATs without explicit gateway_port set on R2 (these should not be
+# advertised when multiple DGPs are configured because the configuration is
+# invalid / ambiguous in that case).
+check ovn-nbctl \
+    lr-nat-add R2 dnat_and_snat 2001:db8:1004::152 2001:db8:201::102
+check ovn-nbctl \
+    lr-nat-add R2 dnat_and_snat 2001:db8:1004::153 2001:db8:201::103
+check ovn-nbctl --wait=hv sync
+
+AT_CHECK([ip link | grep -q ovnvrf$vrf:.*UP])
+
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1003::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1003::151 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::150 dev lo proto 84 metric 100 pref medium
+blackhole 2001:db8:1004::151 dev lo proto 84 metric 100 pref medium
+blackhole 2001:db8:1004::152 dev lo proto 84 metric 100 pref medium
+blackhole 2001:db8:1004::153 dev lo proto 84 metric 100 pref medium])
+
+# Move DGW of R2 to another chassis to verify that route priority decreases.
+check ovn-nbctl                             \
+  -- ha-chassis-group-add-chassis g1 hv2 20 \
+  -- ha-chassis-group-remove-chassis g1 hv1
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1003::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1003::151 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::151 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::152 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::153 dev lo proto 84 metric 1000 pref medium])
+
+# Add "guest" LS connected the distributed router R2 and one "VM" called
+# guest1.
+# Also, connect R2 to ls-join via another DGW.
+check ovn-nbctl                                                       \
+    -- lrp-add R2 r2-guest 00:00:00:00:fd:02 2001:db9:2000::1/64      \
+    -- lrp-add R2 r2-join-dgw2 00:00:00:00:fd:02                      \
+    -- lsp-add ls-join lsp-join-to-r2-dgw2                            \
+    -- lsp-set-type lsp-join-to-r2-dgw2 router                        \
+    -- lsp-set-options lsp-join-to-r2-dgw2 router-port=r2-join-dgw2   \
+    -- ls-add ls-guest                                                \
+    -- lsp-add ls-guest lsp-guest-to-r2                               \
+    -- lsp-set-type lsp-guest-to-r2 router                            \
+    -- lsp-set-options lsp-guest-to-r2 router-port=r2-guest           \
+    -- lsp-set-addresses lsp-guest-to-r2 router                       \
+    -- lsp-add ls-guest guest1                                        \
+    -- lsp-set-addresses guest1 '00:00:00:00:fc:03 2001:db9:2000::10'
+
+check ovn-nbctl \
+    -- set logical_router_port r2-join-dgw2 ha_chassis_group="$group_uuid"
+check ovn-nbctl --wait=hv sync
+
+# Bind guest1 on hv1.
+ADD_NAMESPACES(guest1)
+ADD_VETH(guest1, guest1, br-int, "2001:db9:2000::10/64", "00:00:00:00:fd:03", \
+         "2001:db9:2000::1", "nodad")
+
+# Add distributed NAT on R2 for guest1 and ensure that it's advertised
+# with better metric on chassis hv1 even when DGP for R2 is elsewhere.
+check ovn-nbctl                                                          \
+    --gateway-port r2-join-dgw2 --add-route                              \
+        lr-nat-add R2 dnat_and_snat 2001:db8:1005::150 2001:db9:2000::10 \
+        guest1 00:00:00:00:fc:04
+check ovn-nbctl --wait=hv sync
+
+# At this point, because R2 has multiple DGPs the NAT rules for
+# 2001:db8:1004::152 and 2001:db8:1004::153 have become invalid so ovn
+# shouldn't advertise them anymore.
+
+OVS_WAIT_UNTIL_EQUAL([ip -6 route list vrf ovnvrf$vrf | awk '{$1=$1};1'], [dnl
+blackhole 2001:db8:1003::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1003::151 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::150 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1004::151 dev lo proto 84 metric 1000 pref medium
+blackhole 2001:db8:1005::150 dev lo proto 84 metric 100 pref medium])
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+# Ensure system resources are cleaned up.
+AT_CHECK([ip link | grep -q ovnvrf1003:.*UP], [1])
+AT_CHECK([test `ip -6 route show table 1003 | wc -l` -eq 2], [1])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/Failed to acquire.*/d
+/connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([Mac binding aging - Probing])
+AT_KEYWORDS([mac_binding_probing])
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-int])
+ADD_BR([br-ext])
+ADD_BR([br-gw])
+
+check ovs-ofctl add-flow br-ext action=normal
+check ovs-ofctl add-flow br-gw action=normal
+# Set external-ids in br-int needed for ovn-controller
+check ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller
+start_daemon ovn-controller
+
+check ovn-appctl -t ovn-controller vlog/set mac_cache:file:dbg pinctrl:file:dbg
+check ovn-nbctl lr-add lr
+check ovn-nbctl set logical_router lr options:chassis=hv1
+check ovn-nbctl set logical_router lr options:mac_binding_age_threshold=5
+
+check ovn-nbctl ls-add sw
+check ovn-nbctl ls-add public
+
+check ovn-nbctl lrp-add lr rp-sw 00:00:01:01:02:03 192.168.1.1/24
+check ovn-nbctl lrp-add lr rp-public 00:00:02:01:02:03 172.16.1.1/24
+
+check ovn-nbctl lsp-add sw sw-rp -- set Logical_Switch_Port sw-rp \
+    type=router options:router-port=rp-sw \
+    -- lsp-set-addresses sw-rp router
+
+check ovn-nbctl lsp-add public public-rp -- set Logical_Switch_Port public-rp \
+    type=router options:router-port=rp-public \
+    -- lsp-set-addresses public-rp router
+
+ADD_NAMESPACES(alice)
+ADD_VETH(alice, alice, br-int, "192.168.1.2/24", "f0:00:00:01:02:03", "192.168.1.1")
+check ovn-nbctl lsp-add sw alice -- lsp-set-addresses alice "f0:00:00:01:02:03 192.168.1.2"
+
+check ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext
+check ovn-nbctl lsp-add public public \
+        -- lsp-set-addresses public unknown \
+        -- lsp-set-type public localnet \
+        -- lsp-set-options public network_name=phynet
+
+ADD_NAMESPACES(gw)
+ADD_VETH(gw0, gw, br-ext, "172.16.1.2/24", "f0:00:00:01:02:04", "172.16.1.1")
+ADD_VETH(gw1, gw, br-gw, "172.16.2.2/24", "f0:00:00:01:03:04")
+
+NS_CHECK_EXEC([gw], [sysctl -w net.ipv4.conf.all.forwarding=1],[0], [dnl
+net.ipv4.conf.all.forwarding = 1
+])
+
+ADD_NAMESPACES(bob)
+ADD_VETH(bob, bob, br-gw, "172.16.2.10/24", "f0:00:00:01:02:06", "172.16.2.2")
+
+check ovn-nbctl lr-route-add lr 0.0.0.0/0 172.16.1.2
+check ovn-nbctl --wait=hv sync
+
+NS_CHECK_EXEC([alice], [ping -q -c 3 -i 0.3 -w 2 172.16.2.10 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+check_row_count mac_binding 1 mac=\"f0:00:00:01:02:04\"
+mac_binding_uuid=$(fetch_column mac_binding _uuid logical_port=rp-public ip=172.16.1.2)
+
+NETNS_START_TCPDUMP([gw], [-n -c 2 -i gw0 arp[[6:2]] == 0x1 and arp[[24:4]] == 0xac100102], [gw])
+NS_CHECK_EXEC([alice], [ping -q -c 30 -i 0.5 172.16.2.10 | FORMAT_PING], \
+[0], [dnl
+30 packets transmitted, 30 received, 0% packet loss, time 0ms
+])
+
+# Check mac binding entry is still active.
+check_row_count mac_binding 1 mac=\"f0:00:00:01:02:04\"
+# Check mac binding entry has not been removed.
+AT_CHECK([test "$(fetch_column mac_binding _uuid logical_port=rp-public ip=172.16.1.2)" = "$mac_binding_uuid"])
+OVS_WAIT_UNTIL([
+    n_arp=$(cat gw.tcpdump | wc -l)
+    test ${n_arp} -ge 2
+])
+
+# Wait for the mac binding entry to expire.
+wait_row_count MAC_Binding 0
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/connection dropped.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([bfd induced recomputes])
+ovn_start --use-tcp-to-sb
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-phys])
+
+dnl Set external-ids in br-int needed for ovn-controller
+PARSE_LISTENING_PORT([$ovs_base/ovn-sb/ovsdb-server.log], [TCP_PORT])
+
+check ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=tcp:127.0.0.1:$TCP_PORT \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+start_daemon ovn-controller
+
+check ovn-nbctl ls-add ls
+check ovn-nbctl lsp-add ls lsp1 -- lsp-set-addresses lsp1 "00:00:10:01:02:01 10.0.0.1"
+check ovs-vsctl set open . external_ids:ovn-bridge-mappings=physnet1:br-phys
+check ovs-vsctl add-port br-int vif1 -- set Interface vif1 external-ids:iface-id=lsp1 -- set Interface vif1 type=internal
+
+check ovn-nbctl --wait=hv sync
+wait_for_ports_up
+
+# Stop updates from ovn-controller to sb
+stop_ovsdb_controller_updates $TCP_PORT
+
+# Change sb_global:options:nb_cfg; this will trigger updates to (Chassis_Private in ) sb by ovn-controller.
+check ovn-nbctl --wait=sb sync
+# sb should now be read-only.
+
+lflow_run=$(ovn-appctl -t ovn-controller coverage/read-counter lflow_run)
+
+# Change again nb_cfg.
+check ovn-nbctl --wait=sb sync
+
+# Re-enable notifications from sb.
+restart_ovsdb_controller_updates $TCP_PORT
+
+# Make sure ovn-controller run.
+check ovn-nbctl --wait=hv sync
+
+lflow_run_end=$(ovn-appctl -t ovn-controller coverage/read-counter lflow_run)
+
+n_recomputes=`expr $lflow_run_end - $lflow_run`
+echo "$n_recomputes recomputes"
+
+AT_CHECK([test $lflow_run_end == $lflow_run])
+
+OVN_CLEANUP_CONTROLLER([hv1])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP()
 
 AT_CLEANUP
 ])

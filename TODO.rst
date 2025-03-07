@@ -97,6 +97,7 @@ OVN To-do List
 * ovn-controller Incremental processing
 
   * Implement I-P for datapath groups.
+  * Implement I-P for route exchange relevant ports.
 
 * ovn-northd parallel logical flow processing
 
@@ -136,3 +137,22 @@ OVN To-do List
 
 * Remove ssl_ciphersuites workaround for clustered databases from ovn-ctl
   after 26.03 release, assuming it will be an LTS release.
+
+* Remove OVS database schema parsing from features.c once server side column
+  types are available through IDL.
+
+* Dynamic Routing
+
+  * Add incremental processing of en_dynamic_routes for stateful configuration
+    changes.
+
+  * The ovn-controller currently loads all Advertised_Route entries on startup.
+    This is to prevent deleting our routes on restart. If we defer updating
+    routes until we are sure to have loaded all necessary Advertised_Routes
+    this could be changed.
+
+  * Improve handling of the Learned_Route table in ovn-controller conditional
+    monitoring; once a new local datapath is added we need to wait for
+    monitoring conditions to update before we actually try to learn routes.
+    Otherwise we could try to add duplicated Learned_Routes and the ovnsb
+    commit would fail.

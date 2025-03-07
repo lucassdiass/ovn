@@ -47,7 +47,7 @@ enum ovn_controller_event {
  *
  * Make sure these don't overlap with the logical fields! */
 #define MFF_LOG_REG0             MFF_REG0
-#define MFF_LOG_LB_ORIG_DIP_IPV4 MFF_REG1
+#define MFF_LOG_LB_ORIG_DIP_IPV4 MFF_REG4
 #define MFF_LOG_LB_ORIG_TP_DPORT MFF_REG2
 
 #define MFF_LOG_XXREG0           MFF_XXREG0
@@ -56,14 +56,20 @@ enum ovn_controller_event {
 #define MFF_N_LOG_REGS 10
 
 #define MFF_LOG_LB_AFF_MATCH_IP4_ADDR       MFF_REG4
-#define MFF_LOG_LB_AFF_MATCH_LS_IP6_ADDR    MFF_XXREG0
-#define MFF_LOG_LB_AFF_MATCH_LR_IP6_ADDR    MFF_XXREG1
-#define MFF_LOG_LB_AFF_MATCH_PORT           MFF_REG8
+#define MFF_LOG_LB_AFF_MATCH_IP6_ADDR       MFF_XXREG1
+#define MFF_LOG_LB_AFF_MATCH_PORT           MFF_REG2
 
 #define MFF_LOG_CT_ORIG_NW_DST_ADDR         MFF_REG1   /* REG_ORIG_DIP_IPV4 */
 #define MFF_LOG_CT_ORIG_IP6_DST_ADDR        MFF_XXREG1 /* REG_ORIG_DIP_IPV6 */
 #define MFF_LOG_CT_ORIG_TP_DST_PORT         MFF_REG2   /* REG_ORIG_TP_DPORT
                                                         * (bits 0..15). */
+
+/* Logical registers that are needed for backwards
+ * compatibility with older northd versions.
+ * XXX: All of them can be removed in 26.09. */
+#define MFF_LOG_LB_ORIG_DIP_IPV4_OLD         MFF_REG1
+#define MFF_LOG_LB_AFF_MATCH_PORT_OLD        MFF_REG8
+#define MFF_LOG_LB_AFF_MATCH_LS_IP6_ADDR_OLD MFF_XXREG0
 
 void ovn_init_symtab(struct shash *symtab);
 
@@ -89,6 +95,8 @@ enum mff_log_flags_bits {
     MLF_ICMP_SNAT_BIT = 17,
     MLF_OVERRIDE_LOCAL_ONLY_BIT = 18,
     MLF_FROM_CTRL_BIT = 19,
+    MLF_UNSNAT_NEW_BIT = 20,
+    MLF_UNSNAT_NOT_TRACKED_BIT = 21,
 };
 
 /* MFF_LOG_FLAGS_REG flag assignments */
@@ -146,6 +154,12 @@ enum mff_log_flags {
     MLF_ICMP_SNAT = (1 << MLF_ICMP_SNAT_BIT),
 
     MLF_OVERRIDE_LOCAL_ONLY = (1 << MLF_OVERRIDE_LOCAL_ONLY_BIT),
+
+    /* Indicate that the packet went through unSNAT and had ct.new state. */
+    MLF_UNSNAT_NEW = (1 << MLF_UNSNAT_NEW_BIT),
+
+    /* Indicate that the packet didn't go through unSNAT. */
+    MLF_UNSNAT_NOT_TRACKED = (1 << MLF_UNSNAT_NOT_TRACKED_BIT)
 };
 
 /* OVN logical fields
@@ -208,6 +222,7 @@ const struct ovn_field *ovn_field_from_name(const char *name);
 #define OVN_CT_LB_FORCE_SNAT_BIT 3
 #define OVN_CT_OBS_STAGE_1ST_BIT 4
 #define OVN_CT_OBS_STAGE_END_BIT 5
+#define OVN_CT_ALLOW_ESTABLISHED_BIT 6
 
 #define OVN_CT_BLOCKED 1
 #define OVN_CT_NATTED  2
