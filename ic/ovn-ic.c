@@ -1097,54 +1097,7 @@ prefix_is_filtered(struct in6_addr *prefix,
         return true;
     }
 
-    struct in6_addr bl_prefix;
-    unsigned int bl_plen;
-    char *cur, *next, *start;
-    next = start = xstrdup(ds_cstr(&filter_list));
-    bool matched = false;
-    while ((cur = strsep(&next, ",")) && *cur) {
-        if (!ip46_parse_cidr(cur, &bl_prefix, &bl_plen)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_WARN_RL(&rl, "Bad format in logical router/logical router"
-                         "port options: %s: %s. CIDR expected.",
-                         filter_direction, cur);
-            matched = true;
-            break;
-        }
-
-        if (IN6_IS_ADDR_V4MAPPED(&bl_prefix) != IN6_IS_ADDR_V4MAPPED(prefix)) {
-            continue;
-        }
-
-        /* 192.168.0.0/16 does not belong to 192.168.0.0/17 */
-        if (plen < bl_plen) {
-            continue;
-        }
-
-        if (IN6_IS_ADDR_V4MAPPED(prefix)) {
-            ovs_be32 bl_prefix_v4 = in6_addr_get_mapped_ipv4(&bl_prefix);
-            ovs_be32 prefix_v4 = in6_addr_get_mapped_ipv4(prefix);
-            ovs_be32 mask = be32_prefix_mask(bl_plen);
-
-            if ((prefix_v4 & mask) != (bl_prefix_v4 & mask)) {
-                continue;
-            }
-        } else {
-            struct in6_addr mask = ipv6_create_mask(plen);
-            /* First calculate the difference between bl_prefix and prefix, so
-             * use the bl mask to ensure prefixes are correctly validated.
-             * e.g.: 2005:1734:5678::/50 is a subnet of 2005:1234::/21 */
-            struct in6_addr m_prefixes = ipv6_addr_bitand(prefix, &bl_prefix);
-            struct in6_addr m_prefix = ipv6_addr_bitand(&m_prefixes, &mask);
-            struct in6_addr m_bl_prefix = ipv6_addr_bitand(&bl_prefix, &mask);
-            if (!ipv6_addr_equals(&m_prefix, &m_bl_prefix)) {
-                continue;
-            }
-        }
-        matched = true;
-        break;
-    }
-    free(start);
+    bool matched = find_prefix_in_list(prefix, plen, ds_cstr(&filter_list), filter_direction);
     ds_destroy(&filter_list);
     return matched;
 }
@@ -1154,57 +1107,16 @@ prefix_is_deny_listed(const struct smap *nb_options,
                       struct in6_addr *prefix,
                       unsigned int plen)
 {
-    const char *denylist = smap_get(nb_options, "ic-route-denylist");
+    const char *filter_name = "ic-route-denylist";
+    const char *denylist = smap_get(nb_options, filter_name);
     if (!denylist || !denylist[0]) {
-        denylist = smap_get(nb_options, "ic-route-blacklist");
+        filter_name = "ic-route-blacklist";
+        denylist = smap_get(nb_options, filter_name);
         if (!denylist || !denylist[0]) {
             return false;
         }
     }
-    struct in6_addr bl_prefix;
-    unsigned int bl_plen;
-    char *cur, *next, *start;
-    next = start = xstrdup(denylist);
-    bool matched = false;
-    while ((cur = strsep(&next, ",")) && *cur) {
-        if (!ip46_parse_cidr(cur, &bl_prefix, &bl_plen)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_WARN_RL(&rl, "Bad format in nb_global options:"
-                         "ic-route-denylist: %s. CIDR expected.", cur);
-            continue;
-        }
-
-        if (IN6_IS_ADDR_V4MAPPED(&bl_prefix) != IN6_IS_ADDR_V4MAPPED(prefix)) {
-            continue;
-        }
-
-        /* 192.168.0.0/16 does not belong to 192.168.0.0/17 */
-        if (plen < bl_plen) {
-            continue;
-        }
-
-        if (IN6_IS_ADDR_V4MAPPED(prefix)) {
-            ovs_be32 bl_prefix_v4 = in6_addr_get_mapped_ipv4(&bl_prefix);
-            ovs_be32 prefix_v4 = in6_addr_get_mapped_ipv4(prefix);
-            ovs_be32 mask = be32_prefix_mask(bl_plen);
-
-            if ((prefix_v4 & mask) != (bl_prefix_v4 & mask)) {
-                continue;
-            }
-        } else {
-            struct in6_addr bl_mask = ipv6_create_mask(bl_plen);
-            struct in6_addr m_prefix = ipv6_addr_bitand(prefix, &bl_mask);
-            struct in6_addr m_bl_prefix = ipv6_addr_bitand(&bl_prefix,
-                                                           &bl_mask);
-            if (!ipv6_addr_equals(&m_prefix, &m_bl_prefix)) {
-                continue;
-            }
-        }
-        matched = true;
-        break;
-    }
-    free(start);
-    return matched;
+    return find_prefix_in_list(prefix, plen, denylist, filter_name);
 }
 
 static bool

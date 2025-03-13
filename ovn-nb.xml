@@ -3161,7 +3161,7 @@ or
         for established sessions as we will commit everything in addition
         to already existing stateful NATs and LBs.
       </column>
-    </group>
+
       <column name="options" key="ic-route-filter-adv">
         <p>
           This option expects list of CIDRs delimited by "," that's present
