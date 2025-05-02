@@ -26,6 +26,7 @@
 #include "lflow-mgr.h"
 #include "lib/ovn-parallel-hmap.h"
 #include "lib/ovn-util.h"
+#include "lib/uuidset.h"
 
 VLOG_DEFINE_THIS_MODULE(lflow_mgr);
 
@@ -163,6 +164,7 @@ struct ovn_lflow {
 
     struct ovn_datapath *od;     /* 'logical_datapath' in SB schema.  */
     unsigned long *dpg_bitmap;   /* Bitmap of all datapaths by their 'index'.*/
+    size_t dp_bitmap_len;
     enum ovn_stage stage;
     uint16_t priority;
     char *match;
@@ -181,6 +183,8 @@ struct ovn_lflow {
     struct hmap dp_refcnts_map; /* Maintains the number of times this ovn_lflow
                                  * is referenced by a given datapath.
                                  * Contains 'struct dp_refcnt' in the map. */
+    bool is_old;
+    bool is_to_install;
 };
 
 /* Logical flow table. */
@@ -210,10 +214,14 @@ lflow_table_init(struct lflow_table *lflow_table)
 }
 
 void
-lflow_table_clear(struct lflow_table *lflow_table)
+lflow_table_clear(struct lflow_table *lflow_table, bool destroy_all)
 {
     struct ovn_lflow *lflow;
     HMAP_FOR_EACH_SAFE (lflow, hmap_node, &lflow_table->entries) {
+        if (!destroy_all && lflow->is_old) {
+            lflow->is_to_install = false;
+            continue;
+        }
         ovn_lflow_destroy(lflow_table, lflow);
     }
 
@@ -224,7 +232,7 @@ lflow_table_clear(struct lflow_table *lflow_table)
 void
 lflow_table_destroy(struct lflow_table *lflow_table)
 {
-    lflow_table_clear(lflow_table);
+    lflow_table_clear(lflow_table, true);
     hmap_destroy(&lflow_table->entries);
     ovn_dp_groups_destroy(&lflow_table->ls_dp_groups);
     ovn_dp_groups_destroy(&lflow_table->lr_dp_groups);
@@ -261,11 +269,33 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
     struct hmap *lflows = &lflow_table->entries;
     struct ovn_lflow *lflow;
 
+    struct uuidset sb_uuid_set = UUIDSET_INITIALIZER(&sb_uuid_set);
     fast_hmap_size_for(&lflows_temp,
                        lflow_table->max_seen_lflow_size);
-
+    fast_hmap_size_for(&sb_uuid_set.uuids,
+                       lflow_table->max_seen_lflow_size);
     /* Push changes to the Logical_Flow table to database. */
     const struct sbrec_logical_flow *sbflow;
+    HMAP_FOR_EACH_SAFE (lflow, hmap_node, lflows) {
+        if (!lflow->is_to_install) {
+            ovn_lflow_destroy(lflow_table, lflow);
+            continue;
+        }
+        sbflow = NULL;
+        if (!uuid_is_zero(&lflow->sb_uuid)) {
+            sbflow = sbrec_logical_flow_table_get_for_uuid(sb_flow_table, &lflow->sb_uuid);
+        }
+        sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
+                         lr_datapaths, ovn_internal_version_changed,
+                         sbflow, dpgrp_table);
+    
+        uuidset_insert(&sb_uuid_set, &lflow->sb_uuid);
+        lflow->is_old = true;
+        hmap_remove(lflows, &lflow->hmap_node);
+        hmap_insert(&lflows_temp, &lflow->hmap_node,
+                    hmap_node_hash(&lflow->hmap_node));
+    }
+
     SBREC_LOGICAL_FLOW_TABLE_FOR_EACH_SAFE (sbflow, sb_flow_table) {
         struct sbrec_logical_dp_group *dp_group = sbflow->logical_dp_group;
         struct ovn_datapath *logical_datapath_od = NULL;
@@ -281,6 +311,7 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
                 logical_datapath_od = NULL;
             }
         }
+
         for (i = 0; dp_group && i < dp_group->n_datapaths; i++) {
             logical_datapath_od = ovn_datapath_from_sbrec(
                 &ls_datapaths->datapaths, &lr_datapaths->datapaths,
@@ -294,41 +325,17 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
 
         if (!logical_datapath_od) {
             /* This lflow has no valid logical datapaths. */
+            uuidset_find_and_delete(&sb_uuid_set, &sbflow->header_.uuid);
             sbrec_logical_flow_delete(sbflow);
             continue;
         }
 
-        enum ovn_pipeline pipeline
-            = !strcmp(sbflow->pipeline, "ingress") ? P_IN : P_OUT;
-
-        lflow = ovn_lflow_find(
-            lflows,
-            ovn_stage_build(ovn_datapath_get_type(logical_datapath_od),
-                            pipeline, sbflow->table_id),
-            sbflow->priority, sbflow->match, sbflow->actions,
-            sbflow->controller_meter, sbflow->hash);
-        if (lflow) {
-            sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
-                             lr_datapaths, ovn_internal_version_changed,
-                             sbflow, dpgrp_table);
-
-            hmap_remove(lflows, &lflow->hmap_node);
-            hmap_insert(&lflows_temp, &lflow->hmap_node,
-                        hmap_node_hash(&lflow->hmap_node));
-        } else {
+        if (!uuidset_contains(&sb_uuid_set, &sbflow->header_.uuid)) {
             sbrec_logical_flow_delete(sbflow);
         }
     }
 
-    HMAP_FOR_EACH_SAFE (lflow, hmap_node, lflows) {
-        sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
-                         lr_datapaths, ovn_internal_version_changed,
-                         NULL, dpgrp_table);
-
-        hmap_remove(lflows, &lflow->hmap_node);
-        hmap_insert(&lflows_temp, &lflow->hmap_node,
-                    hmap_node_hash(&lflow->hmap_node));
-    }
+    uuidset_destroy(&sb_uuid_set);
     hmap_swap(lflows, &lflows_temp);
     hmap_destroy(&lflows_temp);
 }
@@ -586,13 +593,17 @@ lflow_ref_unlink_lflows(struct lflow_ref *lflow_ref)
             size_t index;
             BITMAP_FOR_EACH_1 (index, lrn->dpgrp_bitmap_len,
                                lrn->dpgrp_bitmap) {
-                if (dp_refcnt_release(&lrn->lflow->dp_refcnts_map, index)) {
+                if (dp_refcnt_release(&lrn->lflow->dp_refcnts_map, index) ||
+                   (lrn->lflow->is_old &&
+                    bitmap_is_set(lrn->lflow->dpg_bitmap, index))) {
                     bitmap_set0(lrn->lflow->dpg_bitmap, index);
                 }
             }
         } else {
             if (dp_refcnt_release(&lrn->lflow->dp_refcnts_map,
-                                  lrn->dp_index)) {
+                                  lrn->dp_index) ||
+                (lrn->lflow->is_old &&
+                  bitmap_is_set(lrn->lflow->dpg_bitmap, lrn->dp_index))) {
                 bitmap_set0(lrn->lflow->dpg_bitmap, lrn->dp_index);
             }
         }
@@ -682,7 +693,6 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
                          od ? ods_size(od->datapaths) : dp_bitmap_len,
                          hash, stage, priority, match, actions,
                          io_port, ctrl_meter, stage_hint, where, flow_desc);
-
     if (lflow_ref) {
         struct lflow_ref_node *lrn =
             lflow_ref_node_find(&lflow_ref->lflow_ref_nodes, lflow, hash);
@@ -850,6 +860,7 @@ ovn_lflow_init(struct ovn_lflow *lflow, struct ovn_datapath *od,
                const char *flow_desc)
 {
     lflow->dpg_bitmap = bitmap_allocate(dp_bitmap_len);
+    lflow->dp_bitmap_len =  dp_bitmap_len;
     lflow->od = od;
     lflow->stage = stage;
     lflow->priority = priority;
@@ -862,6 +873,8 @@ ovn_lflow_init(struct ovn_lflow *lflow, struct ovn_datapath *od,
     lflow->dpg = NULL;
     lflow->where = where;
     lflow->sb_uuid = UUID_ZERO;
+    lflow->is_old = false;
+    lflow->is_to_install = true;
     hmap_init(&lflow->dp_refcnts_map);
     ovs_list_init(&lflow->referenced_by);
 }
@@ -957,13 +970,13 @@ do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
 {
     struct ovn_lflow *old_lflow;
     struct ovn_lflow *lflow;
-
     ovs_assert(dp_bitmap_len);
-
     old_lflow = ovn_lflow_find(&lflow_table->entries, stage,
                                priority, match, actions, ctrl_meter, hash);
     if (old_lflow) {
-        return old_lflow;
+        if (!old_lflow->is_old && old_lflow->dp_bitmap_len == dp_bitmap_len) {
+            return old_lflow;
+        }
     }
 
     lflow = xzalloc(sizeof *lflow);
@@ -976,6 +989,20 @@ do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
                    nullable_xstrdup(ctrl_meter),
                    ovn_lflow_hint(stage_hint), where,
                    flow_desc);
+    if (old_lflow) {
+        lflow->sb_uuid = old_lflow->sb_uuid;
+        if (lflow->dp_bitmap_len > old_lflow->dp_bitmap_len) {
+            bitmap_or(lflow->dpg_bitmap, old_lflow->dpg_bitmap, old_lflow->dp_bitmap_len);
+        } else if (lflow->dp_bitmap_len < old_lflow->dp_bitmap_len) {
+            bitmap_or(lflow->dpg_bitmap, old_lflow->dpg_bitmap, lflow->dp_bitmap_len);
+        } else {
+            if (ovs_list_size(&old_lflow->referenced_by) || engine_get_force_recompute()) {
+                bitmap_or(lflow->dpg_bitmap, old_lflow->dpg_bitmap, lflow->dp_bitmap_len);
+            }
+        }
+
+        ovn_lflow_destroy(lflow_table, old_lflow);
+    }
 
     if (parallelization_state != STATE_USE_PARALLELIZATION) {
         hmap_insert(&lflow_table->entries, &lflow->hmap_node, hash);
@@ -1125,6 +1152,7 @@ sync_lflow_to_sb(struct ovn_lflow *lflow,
         lflow->dpg = ovn_dp_group_get(dp_groups, lflow->n_ods,
                                       lflow->dpg_bitmap,
                                       n_datapaths);
+                
         if (lflow->dpg) {
             /* Update the dpg's sb dp_group. */
             lflow->dpg->dp_group = sbrec_logical_dp_group_table_get_for_uuid(
@@ -1162,6 +1190,7 @@ sync_lflow_to_sb(struct ovn_lflow *lflow,
         }
         sbrec_logical_flow_set_logical_dp_group(sbflow,
                                                 lflow->dpg->dp_group);
+        
     }
 
     if (pre_sync_dpg != lflow->dpg) {
@@ -1198,9 +1227,13 @@ ovn_dp_group_use(struct ovn_dp_group *dpg)
 static void
 ovn_dp_group_release(struct hmap *dp_groups, struct ovn_dp_group *dpg)
 {
-    if (dpg && !--dpg->refcnt) {
-        hmap_remove(dp_groups, &dpg->node);
-        ovn_dp_group_destroy(dpg);
+    if (dpg) {
+        if (dpg->refcnt)
+            --dpg->refcnt;
+         if (!dpg->refcnt && hmap_contains(dp_groups, &dpg->node)) {
+            hmap_remove(dp_groups, &dpg->node);
+            ovn_dp_group_destroy(dpg);
+        }
     }
 }
 
@@ -1210,7 +1243,8 @@ ovn_dp_group_release(struct hmap *dp_groups, struct ovn_dp_group *dpg)
 static void
 ovn_dp_group_destroy(struct ovn_dp_group *dpg)
 {
-    bitmap_free(dpg->bitmap);
+    if (dpg->bitmap)
+        bitmap_free(dpg->bitmap);
     free(dpg);
 }
 
@@ -1276,6 +1310,7 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
             sbrec_logical_flow_table_get_for_uuid(sbflow_table,
                                                   &lflow->sb_uuid);
 
+                                                  
         struct hmap *dp_groups = NULL;
         size_t n_datapaths;
         if (ovn_stage_to_datapath_type(lflow->stage) == DP_SWITCH) {
@@ -1294,6 +1329,7 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
                                   sblflow, dpgrp_table)) {
                 return false;
             }
+            lflow->is_old = true;
         }
 
         if (!lrn->linked) {
