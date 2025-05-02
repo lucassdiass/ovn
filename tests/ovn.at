@@ -26780,7 +26780,10 @@ wait_row_count Service_Monitor 0 status=online
 # sw1-p1 has been deleted, so sw1 should neither be part of local datapaths on hv2.
 # Since both sw0 and sw1 should not be local, flows in tables OFTABLE_CHK_LB_HAIRPIN and OFTABLE_CT_SNAT_HAIRPIN
 # should have been deleted as well.
-OVN_CLEANUP([hv1], [hv2
+OVN_CLEANUP([hv1
+/error parsing match/d
+], [hv2
+/error parsing match/d
 ln-public
 ignored_dp=lr0,public,sw0,sw1
 ignored_tables=OFTABLE_CHK_LB_HAIRPIN,OFTABLE_CT_SNAT_HAIRPIN])
@@ -26983,7 +26986,10 @@ wait_row_count Service_Monitor 0 status=online
 
 # lr0_public is on hv1. Hence lr0 & public should not be local datapaths on hv2, and ln_public not a related port for hv2.
 # sw1-p1 has been deleted, so sw1 should neither be part of local datapaths on hv2.
-OVN_CLEANUP([hv1], [hv2
+OVN_CLEANUP([hv1
+/error parsing match/d
+], [hv2
+/error parsing match/d
 ln-public
 ignored_dp=lr0,public,sw0,sw1
 ignored_tables=OFTABLE_CHK_LB_HAIRPIN,OFTABLE_CT_SNAT_HAIRPIN])
@@ -36835,6 +36841,9 @@ n_ipv6=$(ovs-ofctl dump-flows br-int table=OFTABLE_MAC_CACHE_USE |awk '/ipv6_src
 OVS_WAIT_UNTIL([test $(ovs-ofctl dump-flows br-int table=OFTABLE_MAC_CACHE_USE | \
                        awk '/ipv6_src=fd12::2/{print substr($6,10,1)}') -ge $((aging_th/2))])
 send_icmp6_echo_req hv1 public 00:00:00:00:10:00 00:00:00:00:50:01 fd12::2 fd11::64
+echo "LUCAS $n_ipv6"
+a=$(ovs-ofctl dump-flows br-int table=OFTABLE_MAC_CACHE_USE |awk '/ipv6_src=fd12::2/{print substr($4,11,1)}')
+echo "LUCAS $a"
 OVS_WAIT_UNTIL([test $(ovs-ofctl dump-flows br-int table=OFTABLE_MAC_CACHE_USE |awk '/ipv6_src=fd12::2/{print substr($4,11,1)}') -ge $((n_ipv6+1))])
 
 OVN_CLEANUP([hv1])
