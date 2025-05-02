@@ -113,6 +113,7 @@ en_lflow_run(struct engine_node *node, void *data)
     lflow_get_input_data(node, &lflow_input);
 
     stopwatch_start(BUILD_LFLOWS_STOPWATCH_NAME, time_msec());
+    VLOG_INFO("LUCAS start en_lflow_run");
 
     struct lflow_data *lflow_data = data;
     lflow_table_clear(lflow_data->lflow_table);
@@ -122,6 +123,7 @@ en_lflow_run(struct engine_node *node, void *data)
     build_lflows(eng_ctx->ovnsb_idl_txn, &lflow_input,
                  lflow_data->lflow_table);
     stopwatch_stop(BUILD_LFLOWS_STOPWATCH_NAME, time_msec());
+    VLOG_INFO("LUCAS stop en_lflow_run");
 
     return EN_UPDATED;
 }
@@ -130,6 +132,7 @@ enum engine_input_handler_result
 lflow_northd_handler(struct engine_node *node,
                      void *data)
 {
+    VLOG_INFO("LUCAS start lflow_northd_handler");
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     if (!northd_has_tracked_data(&northd_data->trk_data)) {
         return EN_UNHANDLED;
@@ -153,6 +156,7 @@ lflow_northd_handler(struct engine_node *node,
             &lflow_input, lflow_data->lflow_table)) {
         return EN_UNHANDLED;
     }
+    VLOG_INFO("LUCAS stop lflow_northd_handler");
 
     return EN_HANDLED_UPDATED;
 }
