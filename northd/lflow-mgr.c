@@ -26,6 +26,7 @@
 #include "lflow-mgr.h"
 #include "lib/ovn-parallel-hmap.h"
 #include "lib/ovn-util.h"
+#include "lib/uuidset.h"
 
 VLOG_DEFINE_THIS_MODULE(lflow_mgr);
 
@@ -181,6 +182,8 @@ struct ovn_lflow {
     struct hmap dp_refcnts_map; /* Maintains the number of times this ovn_lflow
                                  * is referenced by a given datapath.
                                  * Contains 'struct dp_refcnt' in the map. */
+    bool is_old;
+    bool is_to_install;
 };
 
 /* Logical flow table. */
@@ -189,6 +192,7 @@ struct lflow_table {
     struct hmap ls_dp_groups; /* hmap of logical switch dp groups. */
     struct hmap lr_dp_groups; /* hmap of logical router dp groups. */
     ssize_t max_seen_lflow_size;
+    struct uuidset sb_uuid_set;
 };
 
 struct lflow_table *
@@ -207,27 +211,36 @@ lflow_table_init(struct lflow_table *lflow_table)
                        lflow_table->max_seen_lflow_size);
     ovn_dp_groups_init(&lflow_table->ls_dp_groups);
     ovn_dp_groups_init(&lflow_table->lr_dp_groups);
+    VLOG_INFO("LUCAS uuidset_init");
+    uuidset_init(&lflow_table->sb_uuid_set);
 }
 
 void
-lflow_table_clear(struct lflow_table *lflow_table)
+lflow_table_clear(struct lflow_table *lflow_table, bool is_to_destroy)
 {
     struct ovn_lflow *lflow;
     HMAP_FOR_EACH_SAFE (lflow, hmap_node, &lflow_table->entries) {
+        if (!is_to_destroy && lflow->is_old) {
+            lflow->is_to_install = false;
+            continue;
+        }
         ovn_lflow_destroy(lflow_table, lflow);
     }
 
     ovn_dp_groups_clear(&lflow_table->ls_dp_groups);
     ovn_dp_groups_clear(&lflow_table->lr_dp_groups);
+    VLOG_INFO("LUCAS uuidset_clear");
+    //uuidset_clear(&lflow_table->sb_uuid_set);
 }
 
 void
 lflow_table_destroy(struct lflow_table *lflow_table)
 {
-    lflow_table_clear(lflow_table);
+    lflow_table_clear(lflow_table, true);
     hmap_destroy(&lflow_table->entries);
     ovn_dp_groups_destroy(&lflow_table->ls_dp_groups);
     ovn_dp_groups_destroy(&lflow_table->lr_dp_groups);
+    uuidset_destroy(&lflow_table->sb_uuid_set);
     free(lflow_table);
 }
 
@@ -297,6 +310,19 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
             sbrec_logical_flow_delete(sbflow);
             continue;
         }
+        //VLOG_INFO("LUCAS SYNC sbuuid find: %0x-%0x-%0x-%0x %d", sbflow->header_.uuid.parts[0], sbflow->header_.uuid.parts[1],
+        //                                                     sbflow->header_.uuid.parts[2], sbflow->header_.uuid.parts[3], uuidset_is_empty(&lflow_table->sb_uuid_set));
+        if (!uuidset_is_empty(&lflow_table->sb_uuid_set)) {
+            struct uuidset_node *sb_entry =  uuidset_find(&lflow_table->sb_uuid_set,
+                                                          &sbflow->header_.uuid);
+            if(!sb_entry) {
+                sbrec_logical_flow_delete(sbflow);
+                continue;
+            }
+            //VLOG_INFO("LUCAS SYNC sbuuid found: %0x-%0x-%0x-%0x", sbflow->header_.uuid.parts[0], sbflow->header_.uuid.parts[1],
+            //    sbflow->header_.uuid.parts[2], sbflow->header_.uuid.parts[3]);
+            uuidset_delete(&lflow_table->sb_uuid_set, sb_entry);
+        }
 
         enum ovn_pipeline pipeline
             = !strcmp(sbflow->pipeline, "ingress") ? P_IN : P_OUT;
@@ -311,7 +337,7 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
             sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
                              lr_datapaths, ovn_internal_version_changed,
                              sbflow, dpgrp_table);
-
+            lflow->is_old = true;
             hmap_remove(lflows, &lflow->hmap_node);
             hmap_insert(&lflows_temp, &lflow->hmap_node,
                         hmap_node_hash(&lflow->hmap_node));
@@ -321,14 +347,21 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
     }
 
     HMAP_FOR_EACH_SAFE (lflow, hmap_node, lflows) {
+        if (lflow->is_old) {
+            ovn_lflow_destroy(lflow_table, lflow);
+            continue;
+        }
         sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
                          lr_datapaths, ovn_internal_version_changed,
                          NULL, dpgrp_table);
-
+        lflow->is_old = true;
+        //VLOG_INFO("LUCAS SYNC sbuuid install: %0x-%0x-%0x-%0x", lflow->sb_uuid.parts[0], lflow->sb_uuid.parts[1],
+        //                                                        lflow->sb_uuid.parts[2], lflow->sb_uuid.parts[3]);
         hmap_remove(lflows, &lflow->hmap_node);
         hmap_insert(&lflows_temp, &lflow->hmap_node,
                     hmap_node_hash(&lflow->hmap_node));
     }
+    uuidset_clear(&lflow_table->sb_uuid_set);
     hmap_swap(lflows, &lflows_temp);
     hmap_destroy(&lflows_temp);
 }
@@ -874,6 +907,8 @@ ovn_lflow_init(struct ovn_lflow *lflow, struct ovn_datapath *od,
     lflow->dpg = NULL;
     lflow->where = where;
     lflow->sb_uuid = UUID_ZERO;
+    lflow->is_old = false;
+    lflow->is_to_install = true;
     hmap_init(&lflow->dp_refcnts_map);
     ovs_list_init(&lflow->referenced_by);
 }
@@ -969,13 +1004,26 @@ do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
 {
     struct ovn_lflow *old_lflow;
     struct ovn_lflow *lflow;
-
+    struct uuid sb_uuid = UUID_ZERO;
     ovs_assert(dp_bitmap_len);
 
     old_lflow = ovn_lflow_find(&lflow_table->entries, stage,
                                priority, match, actions, ctrl_meter, hash);
     if (old_lflow) {
-        return old_lflow;
+        if (old_lflow->is_to_install) {
+            return old_lflow;
+        }
+        sb_uuid = old_lflow->sb_uuid;
+        ovn_lflow_destroy(lflow_table, old_lflow);
+    }
+
+    if (!uuid_is_zero(&sb_uuid)) {
+        //VLOG_INFO("LUCAS SYNC sbuuid insert: %0x-%0x-%0x-%0x", sb_uuid.parts[0], sb_uuid.parts[1],
+        //                                                     sb_uuid.parts[2], sb_uuid.parts[3]);
+        static struct ovs_mutex mutex_sb_uuid_set = OVS_MUTEX_INITIALIZER;
+        ovs_mutex_lock(&mutex_sb_uuid_set);
+        uuidset_insert(&lflow_table->sb_uuid_set, &sb_uuid);
+        ovs_mutex_unlock(&mutex_sb_uuid_set);
     }
 
     lflow = xzalloc(sizeof *lflow);
@@ -1301,16 +1349,17 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
         size_t n_ods = bitmap_count1(lflow->dpg_bitmap, n_datapaths);
 
         if (n_ods) {
+            //VLOG_INFO("LUCAS lflow_ref_sync_lflows__");
             if (!sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
                                   lr_datapaths, ovn_internal_version_changed,
                                   sblflow, dpgrp_table)) {
                 return false;
             }
+            lflow->is_old = true;
         }
 
         if (!lrn->linked) {
             lflow_ref_node_destroy(lrn);
-
             if (ovs_list_is_empty(&lflow->referenced_by)) {
                 ovn_dp_group_release(dp_groups, lflow->dpg);
                 ovn_lflow_destroy(lflow_table, lflow);
