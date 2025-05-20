@@ -617,13 +617,17 @@ lflow_ref_unlink_lflows(struct lflow_ref *lflow_ref)
             size_t index;
             BITMAP_FOR_EACH_1 (index, lrn->dpgrp_bitmap_len,
                                lrn->dpgrp_bitmap) {
-                if (dp_refcnt_release(&lrn->lflow->dp_refcnts_map, index)) {
+                if (dp_refcnt_release(&lrn->lflow->dp_refcnts_map, index)/* ||
+                   (lrn->lflow->is_old &&
+                    bitmap_is_set(lrn->lflow->dpg_bitmap, index))*/) {
                     bitmap_set0(lrn->lflow->dpg_bitmap, index);
                 }
             }
         } else {
             if (dp_refcnt_release(&lrn->lflow->dp_refcnts_map,
-                                  lrn->dp_index)) {
+                                  lrn->dp_index)/*||
+                (lrn->lflow->is_old &&
+                  bitmap_is_set(lrn->lflow->dpg_bitmap, lrn->dp_index))*/) {
                 bitmap_set0(lrn->lflow->dpg_bitmap, lrn->dp_index);
             }
         }
@@ -708,6 +712,7 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
                                  actions);
 
     hash_lock = lflow_hash_lock(&lflow_table->entries, hash);
+    //VLOG_INFO("LUCAS lflow table add %s actiion %s len %ld %ld", match, actions, od ? ods_size(od->datapaths) : 0, dp_bitmap_len);
     struct ovn_lflow *lflow =
         do_ovn_lflow_add(lflow_table,
                          od ? ods_size(od->datapaths) : dp_bitmap_len,
@@ -977,7 +982,7 @@ ovn_lflow_hint(const struct ovsdb_idl_row *row)
 static void
 ovn_lflow_destroy(struct lflow_table *lflow_table, struct ovn_lflow *lflow)
 {
-    VLOG_INFO("LUCAS destroy %s", lflow->match);
+    //VLOG_INFO("LUCAS destroy %s", lflow->match);
     hmap_remove(&lflow_table->entries, &lflow->hmap_node);
     bitmap_free(lflow->dpg_bitmap);
     free(lflow->match);
@@ -1010,7 +1015,7 @@ do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
     old_lflow = ovn_lflow_find(&lflow_table->entries, stage,
                                    priority, match, actions,
                                    ctrl_meter, hash);
-    VLOG_INFO("LUCAS new %s %ld", match,  dp_bitmap_len);
+    VLOG_INFO("LUCAS len %ld mat %s action %s", dp_bitmap_len, match, actions);
     if (old_lflow) {
         if (!old_lflow->is_old) {
             return old_lflow;
@@ -1028,13 +1033,13 @@ do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
                    ovn_lflow_hint(stage_hint), where,
                    flow_desc);
     if (old_lflow) {
-        VLOG_INFO("LUCAS old %s %x-%x-%x-%x %ld", match,old_lflow->sb_uuid.parts[0], old_lflow->sb_uuid.parts[1],
-                                              old_lflow->sb_uuid.parts[2], old_lflow->sb_uuid.parts[3], old_lflow->n_ods);
+        VLOG_INFO("LUCAS old len %ld mat %s action %s %d %d", old_lflow->n_ods, old_lflow->match, old_lflow->actions,old_lflow->od == NULL, old_lflow->dpg == NULL);
         lflow->sb_uuid = old_lflow->sb_uuid;
-        unsigned long *dpg_bitmap = lflow->dpg_bitmap;   /* Bitmap of all datapaths by their 'index'.*/
-        lflow->dpg_bitmap = old_lflow->dpg_bitmap;
-        //lflow->od = old_lflow->od;
-        old_lflow->dpg_bitmap = dpg_bitmap;
+        if (dp_bitmap_len < old_lflow->n_ods /*&& old_lflow->dpg*/) {
+            unsigned long *dpg_bitmap = lflow->dpg_bitmap;
+            lflow->dpg_bitmap = old_lflow->dpg_bitmap;
+            old_lflow->dpg_bitmap = dpg_bitmap;
+        }
         ovn_lflow_destroy(lflow_table, old_lflow);
     }
 
@@ -1314,10 +1319,13 @@ ovn_dp_group_add_with_reference(struct ovn_lflow *lflow_ref,
                                 size_t bitmap_len)
     OVS_REQUIRES(fake_hash_mutex)
 {
+
     if (od) {
+        //VLOG_INFO("LUCAS lflow table add dpg %s actiion %s len %ld %ld", lflow_ref->match, lflow_ref->actions, od ? od->index : 0, bitmap_len);
         bitmap_set1(lflow_ref->dpg_bitmap, od->index);
     }
     if (dp_bitmap) {
+        //VLOG_INFO("LUCAS lflow table add dpg %s actiion %s len %ld %ld", lflow_ref->match, lflow_ref->actions, 0, bitmap_len);
         bitmap_or(lflow_ref->dpg_bitmap, dp_bitmap, bitmap_len);
     }
 }
@@ -1354,15 +1362,14 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
         size_t n_ods = bitmap_count1(lflow->dpg_bitmap, n_datapaths);
 
         if (n_ods) {
-            lflow->is_old = true;
             if (!sync_lflow_to_sb(lflow, ovnsb_txn, lflow_table, ls_datapaths,
                                   lr_datapaths, ovn_internal_version_changed,
                                   sblflow, dpgrp_table)) {
-                lflow->is_old  = false;
-                VLOG_INFO("LUCAS false new %s %ld", lflow->match,  lflow->n_ods);
+              //  VLOG_INFO("LUCAS false new %s %ld", lflow->match,  lflow->n_ods);
                 return false;
             }
-            VLOG_INFO("LUCAS true new %s %ld", lflow->match,  lflow->n_ods);
+            lflow->is_old = true;
+            //VLOG_INFO("LUCAS true new %s %ld", lflow->match,  lflow->n_ods);
         }
 
         if (!lrn->linked) {
