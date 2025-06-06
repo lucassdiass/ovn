@@ -217,8 +217,6 @@ void
 lflow_table_clear(struct lflow_table *lflow_table, bool destroy_all)
 {
     struct ovn_lflow *lflow;
-    size_t i = 0;
-    size_t entry_size = hmap_count(&lflow_table->entries);
     HMAP_FOR_EACH_SAFE (lflow, hmap_node, &lflow_table->entries) {
         if (!destroy_all && lflow->is_old) {
             lflow->is_to_install = false;
@@ -725,12 +723,6 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
                          od ? ods_size(od->datapaths) : dp_bitmap_len,
                          hash, stage, priority, match, actions,
                          io_port, ctrl_meter, stage_hint, where, flow_desc);
-    const char *name = "SWNULL";
-    if (od && od->nbs) {
-        name = od->nbs->name;
-    }
-    //VLOG_INFO("LUCAS do lflow add %s %ld %s", lflow->match, od ? ods_size(od->datapaths) : dp_bitmap_len, name );
-
     if (lflow_ref) {
         struct lflow_ref_node *lrn =
             lflow_ref_node_find(&lflow_ref->lflow_ref_nodes, lflow, hash);
@@ -1021,7 +1013,6 @@ do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
     struct ovn_lflow *old_lflow;
     struct ovn_lflow *lflow;
     ovs_assert(dp_bitmap_len);
-    struct uuid sb_uuid;
     old_lflow = ovn_lflow_find(&lflow_table->entries, stage,
                                    priority, match, actions,
                                    ctrl_meter, hash);
