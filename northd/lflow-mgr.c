@@ -67,7 +67,7 @@ static struct sbrec_logical_dp_group *ovn_sb_insert_or_update_logical_dp_group(
     struct ovsdb_idl_txn *ovnsb_txn,
     struct sbrec_logical_dp_group *,
     const unsigned long *dpg_bitmap,
-    const struct ovn_datapaths *);
+    const struct ovn_datapath_binding_hashvec *);
 static struct ovn_dp_group *ovn_dp_group_find(const struct hmap *dp_groups,
                                               const unsigned long *dpg_bitmap,
                                               size_t bitmap_len,
@@ -88,13 +88,14 @@ static bool lflow_ref_sync_lflows__(
     bool ovn_internal_version_changed,
     const struct sbrec_logical_flow_table *,
     const struct sbrec_logical_dp_group_table *);
-static bool sync_lflow_to_sb(struct ovn_lflow *,
-                             struct ovsdb_idl_txn *ovnsb_txn,
-                             struct hmap *dp_groups,
-                             const struct ovn_datapaths *datapaths,
-                             bool ovn_internal_version_changed,
-                             const struct sbrec_logical_flow *sbflow,
-                             const struct sbrec_logical_dp_group_table *);
+static bool sync_lflow_to_sb(
+    struct ovn_lflow *,
+    struct ovsdb_idl_txn *ovnsb_txn,
+    struct hmap *dp_groups,
+    const struct ovn_datapath_binding_hashvec *datapaths,
+    bool ovn_internal_version_changed,
+    const struct sbrec_logical_flow *sbflow,
+    const struct sbrec_logical_dp_group_table *);
 
 /* TODO:  Move the parallization logic to this module to avoid accessing
  * and modifying in both northd.c and lflow-mgr.c. */
@@ -298,7 +299,7 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
             sbflow->priority, sbflow->match, sbflow->actions,
             sbflow->controller_meter, sbflow->hash);
         if (lflow) {
-            const struct ovn_datapaths *datapaths =
+            const struct ovn_datapath_binding_hashvec *datapaths =
                 all_dp_info[dp_type].datapaths;
             struct hmap *dp_groups = &all_dp_info[dp_type].dp_groups;
             sync_lflow_to_sb(lflow, ovnsb_txn, dp_groups, datapaths,
@@ -316,7 +317,8 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
         enum ovn_datapath_type dp_type =
             ovn_stage_to_datapath_type(lflow->stage);
         struct hmap *dp_groups = &all_dp_info[dp_type].dp_groups;
-        const struct ovn_datapaths *datapaths = all_dp_info[dp_type].datapaths;
+        const struct ovn_datapath_binding_hashvec *datapaths =
+            all_dp_info[dp_type].datapaths;
         sync_lflow_to_sb(lflow, ovnsb_txn, dp_groups, datapaths,
                          ovn_internal_version_changed, NULL, dpgrp_table);
 
@@ -736,7 +738,7 @@ ovn_dp_group_create(struct ovsdb_idl_txn *ovnsb_txn,
                     size_t desired_n,
                     const unsigned long *desired_bitmap,
                     size_t bitmap_len,
-                    const struct ovn_datapaths *datapaths)
+                    const struct ovn_datapath_binding_hashvec *datapaths)
 {
     struct ovn_dp_group *dpg;
 
@@ -746,14 +748,13 @@ ovn_dp_group_create(struct ovsdb_idl_txn *ovnsb_txn,
 
     dpg_bitmap = sb_group ? bitmap_allocate(bitmap_len) : NULL;
     for (i = 0; sb_group && i < sb_group->n_datapaths; i++) {
-        struct ovn_datapath *datapath_od;
+        const struct ovn_datapath_binding *binding;
 
-        datapath_od = ovn_datapath_from_sbrec_(&datapaths->datapaths,
-                                               sb_group->datapaths[i]);
-        if (!datapath_od || ovn_datapath_is_stale(datapath_od)) {
+        binding = ovn_datapath_binding_find(datapaths, sb_group->datapaths[i]);
+        if (!binding) {
             break;
         }
-        bitmap_set1(dpg_bitmap, datapath_od->index);
+        bitmap_set1(dpg_bitmap, binding->index);
         n++;
     }
     if (!sb_group || i != sb_group->n_datapaths) {
@@ -976,18 +977,18 @@ static bool
 sync_lflow_to_sb(struct ovn_lflow *lflow,
                  struct ovsdb_idl_txn *ovnsb_txn,
                  struct hmap *dp_groups,
-                 const struct ovn_datapaths *datapaths,
+                 const struct ovn_datapath_binding_hashvec *datapaths,
                  bool ovn_internal_version_changed,
                  const struct sbrec_logical_flow *sbflow,
                  const struct sbrec_logical_dp_group_table *sb_dpgrp_table)
 {
     struct sbrec_logical_dp_group *sbrec_dp_group = NULL;
     struct ovn_dp_group *pre_sync_dpg = lflow->dpg;
-    struct ovn_datapath **datapaths_array;
+    struct ovn_datapath_binding **datapaths_array;
     size_t n_datapaths;
 
-    n_datapaths = ods_size(datapaths);
-    datapaths_array = datapaths->array;
+    n_datapaths = hmap_count(&datapaths->bindings_map);
+    datapaths_array = vector_get_array(&datapaths->bindings_vec);
 
     lflow->n_ods = bitmap_count1(lflow->dpg_bitmap, n_datapaths);
     ovs_assert(lflow->n_ods);
@@ -1186,17 +1187,20 @@ ovn_dp_group_destroy(struct ovn_dp_group *dpg)
 
 static struct sbrec_logical_dp_group *
 ovn_sb_insert_or_update_logical_dp_group(
-                            struct ovsdb_idl_txn *ovnsb_txn,
-                            struct sbrec_logical_dp_group *dp_group,
-                            const unsigned long *dpg_bitmap,
-                            const struct ovn_datapaths *datapaths)
+                        struct ovsdb_idl_txn *ovnsb_txn,
+                        struct sbrec_logical_dp_group *dp_group,
+                        const unsigned long *dpg_bitmap,
+                        const struct ovn_datapath_binding_hashvec *datapaths)
 {
     const struct sbrec_datapath_binding **sb;
     size_t n = 0, index;
+    size_t n_datapaths = hmap_count(&datapaths->bindings_map);
+    struct ovn_datapath_binding **bindings =
+        vector_get_array(&datapaths->bindings_vec);
 
-    sb = xmalloc(bitmap_count1(dpg_bitmap, ods_size(datapaths)) * sizeof *sb);
-    BITMAP_FOR_EACH_1 (index, ods_size(datapaths), dpg_bitmap) {
-        sb[n++] = datapaths->array[index]->sb;
+    sb = xmalloc(bitmap_count1(dpg_bitmap, n_datapaths) * sizeof *sb);
+    BITMAP_FOR_EACH_1 (index, n_datapaths, dpg_bitmap) {
+        sb[n++] = bindings[index]->sb;
     }
     if (!dp_group) {
         struct uuid dpg_uuid = uuid_random();
@@ -1250,8 +1254,9 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
         enum ovn_datapath_type dp_type =
             ovn_stage_to_datapath_type(lflow->stage);
         struct hmap *dp_groups = &all_dp_info[dp_type].dp_groups;
-        const struct ovn_datapaths *datapaths = all_dp_info[dp_type].datapaths;
-        n_datapaths = ods_size(datapaths);
+        const struct ovn_datapath_binding_hashvec *datapaths =
+            all_dp_info[dp_type].datapaths;
+        n_datapaths = hmap_count(&datapaths->bindings_map);
 
         size_t n_ods = bitmap_count1(lflow->dpg_bitmap, n_datapaths);
 

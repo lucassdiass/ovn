@@ -35,6 +35,8 @@
 #include "lib/ovn-util.h"
 #include "lflow-mgr.h"
 #include "northd.h"
+#include "en-datapath-logical-switch.h"
+#include "en-datapath-logical-router.h"
 
 #include "openvswitch/vlog.h"
 
@@ -243,30 +245,33 @@ static void sb_lb_table_destroy(struct sb_lb_table *);
 
 static struct sb_lb_record *sb_lb_table_find(struct hmap *sb_lbs,
                                              const struct uuid *);
-static void sb_lb_table_build_and_sync(struct sb_lb_table *,
-                                struct ovsdb_idl_txn *ovnsb_txn,
-                                const struct sbrec_load_balancer_table *,
-                                const struct sbrec_logical_dp_group_table *,
-                                struct hmap *lb_dps_map,
-                                struct ovn_datapaths *ls_datapaths,
-                                struct ovn_datapaths *lr_datapaths,
-                                struct chassis_features *);
-static bool sync_sb_lb_record(struct sb_lb_record *,
-                              const struct sbrec_load_balancer *,
-                              const struct sbrec_logical_dp_group_table *,
-                              struct sb_lb_table *,
-                              struct ovsdb_idl_txn *ovnsb_txn,
-                              struct ovn_datapaths *ls_datapaths,
-                              struct ovn_datapaths *lr_datapaths,
-                              struct chassis_features *);
-static bool sync_changed_lbs(struct sb_lb_table *,
-                             struct ovsdb_idl_txn *ovnsb_txn,
-                             const struct sbrec_load_balancer_table *,
-                             const struct sbrec_logical_dp_group_table *,
-                             struct tracked_lbs *,
-                             struct ovn_datapaths *ls_datapaths,
-                             struct ovn_datapaths *lr_datapaths,
-                             struct chassis_features *);
+static void sb_lb_table_build_and_sync(
+    struct sb_lb_table *,
+    struct ovsdb_idl_txn *ovnsb_txn,
+    const struct sbrec_load_balancer_table *,
+    const struct sbrec_logical_dp_group_table *,
+    struct hmap *lb_dps_map,
+    const struct ovn_datapath_binding_hashvec *ls_datapaths,
+    const struct ovn_datapath_binding_hashvec *lr_datapaths,
+    struct chassis_features *);
+static bool sync_sb_lb_record(
+    struct sb_lb_record *,
+    const struct sbrec_load_balancer *,
+    const struct sbrec_logical_dp_group_table *,
+    struct sb_lb_table *,
+    struct ovsdb_idl_txn *ovnsb_txn,
+    const struct ovn_datapath_binding_hashvec *ls_datapaths,
+    const struct ovn_datapath_binding_hashvec *lr_datapaths,
+    struct chassis_features *);
+static bool sync_changed_lbs(
+    struct sb_lb_table *,
+    struct ovsdb_idl_txn *ovnsb_txn,
+    const struct sbrec_load_balancer_table *,
+    const struct sbrec_logical_dp_group_table *,
+    struct tracked_lbs *,
+    const struct ovn_datapath_binding_hashvec *ls_datapaths,
+    const struct ovn_datapath_binding_hashvec *lr_datapaths,
+    struct chassis_features *);
 
 void *
 en_sync_to_sb_lb_init(struct engine_node *node OVS_UNUSED,
@@ -288,6 +293,10 @@ en_sync_to_sb_lb_run(struct engine_node *node, void *data_)
         EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
+    const struct ovn_synced_logical_switch_map *synced_lses =
+        engine_get_input_data("datapath_synced_logical_switch", node);
+    const struct ovn_synced_logical_switch_map *synced_lrs =
+        engine_get_input_data("datapath_synced_logical_router", node);
     const struct engine_context *eng_ctx = engine_get_context();
     struct ed_type_sync_to_sb_lb_data *data = data_;
 
@@ -296,8 +305,8 @@ en_sync_to_sb_lb_run(struct engine_node *node, void *data_)
                                sb_load_balancer_table,
                                sb_dpgrp_table,
                                &northd_data->lb_datapaths_map,
-                               &northd_data->ls_datapaths,
-                               &northd_data->lr_datapaths,
+                               &synced_lses->datapaths,
+                               &synced_lrs->datapaths,
                                &global_config->features);
 
     return EN_UPDATED;
@@ -331,11 +340,15 @@ sync_to_sb_lb_northd_handler(struct engine_node *node, void *data_)
         EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
+    const struct ovn_synced_logical_switch_map *synced_lses =
+        engine_get_input_data("datapath_synced_logical_switch", node);
+    const struct ovn_synced_logical_switch_map *synced_lrs =
+        engine_get_input_data("datapath_synced_logical_router", node);
     struct ed_type_sync_to_sb_lb_data *data = data_;
 
     if (!sync_changed_lbs(&data->sb_lbs, eng_ctx->ovnsb_idl_txn, sb_lb_table,
                           sb_dpgrp_table, &nd->trk_data.trk_lbs,
-                          &nd->ls_datapaths, &nd->lr_datapaths,
+                          &synced_lses->datapaths, &synced_lrs->datapaths,
                           &global_config->features)) {
         return EN_UNHANDLED;
     }
@@ -672,8 +685,9 @@ sb_lb_table_build_and_sync(
     struct sb_lb_table *sb_lbs, struct ovsdb_idl_txn *ovnsb_txn,
     const struct sbrec_load_balancer_table *sb_lb_table,
     const struct sbrec_logical_dp_group_table *sb_dpgrp_table,
-    struct hmap *lb_dps_map, struct ovn_datapaths *ls_datapaths,
-    struct ovn_datapaths *lr_datapaths,
+    struct hmap *lb_dps_map,
+    const struct ovn_datapath_binding_hashvec *ls_datapaths,
+    const struct ovn_datapath_binding_hashvec *lr_datapaths,
     struct chassis_features *chassis_features)
 {
     struct hmap tmp_sb_lbs = HMAP_INITIALIZER(&tmp_sb_lbs);
@@ -733,8 +747,8 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
                   const struct sbrec_logical_dp_group_table *sb_dpgrp_table,
                   struct sb_lb_table *sb_lbs,
                   struct ovsdb_idl_txn *ovnsb_txn,
-                  struct ovn_datapaths *ls_datapaths,
-                  struct ovn_datapaths *lr_datapaths,
+                  const struct ovn_datapath_binding_hashvec *ls_datapaths,
+                  const struct ovn_datapath_binding_hashvec *lr_datapaths,
                   struct chassis_features *chassis_features)
 {
     struct sbrec_logical_dp_group *sbrec_ls_dp_group = NULL;
@@ -760,10 +774,11 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
     }
 
     if (lb_dps->n_nb_ls) {
-        sb_lb->ls_dpg = ovn_dp_group_get(&sb_lbs->ls_dp_groups,
-                                         lb_dps->n_nb_ls,
-                                         lb_dps->nb_ls_map,
-                                         ods_size(ls_datapaths));
+        sb_lb->ls_dpg = ovn_dp_group_get(
+            &sb_lbs->ls_dp_groups,
+            lb_dps->n_nb_ls,
+            lb_dps->nb_ls_map,
+            hmap_count(&ls_datapaths->bindings_map));
         if (sb_lb->ls_dpg) {
             /* Update the dpg's sb dp_group. */
             sb_lb->ls_dpg->dp_group =
@@ -793,7 +808,7 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
             sb_lb->ls_dpg = ovn_dp_group_create(
                 ovnsb_txn, &sb_lbs->ls_dp_groups, sbrec_ls_dp_group,
                 lb_dps->n_nb_ls, lb_dps->nb_ls_map,
-                ods_size(ls_datapaths), ls_datapaths);
+                hmap_count(&ls_datapaths->bindings_map), ls_datapaths);
         }
 
         if (chassis_features->ls_dpg_column) {
@@ -814,10 +829,11 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
 
 
     if (lb_dps->n_nb_lr) {
-        sb_lb->lr_dpg = ovn_dp_group_get(&sb_lbs->lr_dp_groups,
-                                         lb_dps->n_nb_lr,
-                                         lb_dps->nb_lr_map,
-                                         ods_size(lr_datapaths));
+        sb_lb->lr_dpg = ovn_dp_group_get(
+            &sb_lbs->lr_dp_groups,
+            lb_dps->n_nb_lr,
+            lb_dps->nb_lr_map,
+            hmap_count(&lr_datapaths->bindings_map));
         if (sb_lb->lr_dpg) {
             /* Update the dpg's sb dp_group. */
             sb_lb->lr_dpg->dp_group =
@@ -847,7 +863,7 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
             sb_lb->lr_dpg = ovn_dp_group_create(
                 ovnsb_txn, &sb_lbs->lr_dp_groups, sbrec_lr_dp_group,
                 lb_dps->n_nb_lr, lb_dps->nb_lr_map,
-                ods_size(lr_datapaths), lr_datapaths);
+                hmap_count(&lr_datapaths->bindings_map), lr_datapaths);
         }
 
         sbrec_load_balancer_set_lr_datapath_group(sbrec_lb,
@@ -892,8 +908,8 @@ sync_changed_lbs(struct sb_lb_table *sb_lbs,
                  const struct sbrec_load_balancer_table *sb_lb_table,
                  const struct sbrec_logical_dp_group_table *sb_dpgrp_table,
                  struct tracked_lbs *trk_lbs,
-                 struct ovn_datapaths *ls_datapaths,
-                 struct ovn_datapaths *lr_datapaths,
+                 const struct ovn_datapath_binding_hashvec *ls_datapaths,
+                 const struct ovn_datapath_binding_hashvec *lr_datapaths,
                  struct chassis_features *chassis_features)
 {
     struct ovn_lb_datapaths *lb_dps;

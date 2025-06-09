@@ -199,7 +199,7 @@ struct ovn_dp_group *ovn_dp_group_create(
     struct ovsdb_idl_txn *ovnsb_txn, struct hmap *dp_groups,
     struct sbrec_logical_dp_group *sb_group,
     size_t desired_n, const unsigned long *desired_bitmap,
-    size_t bitmap_len, const struct ovn_datapaths *datapaths);
+    size_t bitmap_len, const struct ovn_datapath_binding_hashvec *datapaths);
 
 static inline void
 inc_ovn_dp_group_ref(struct ovn_dp_group *dpg)

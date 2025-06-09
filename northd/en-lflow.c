@@ -370,8 +370,8 @@ static void
 lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
                      const struct sbrec_logical_flow_table *sb_lflow_table,
                      const struct lflow_data *lflow_data,
-                     const struct ovn_datapaths *ls_datapaths,
-                     const struct ovn_datapaths *lr_datapaths)
+                     const struct ovn_synced_logical_switch_map *synced_lses,
+                     const struct ovn_synced_logical_router_map *synced_lrs)
 {
     hmap_init(&lflow_sync->sb_lflows.valid);
     hmap_init(&lflow_sync->sb_lflows.to_delete);
@@ -381,9 +381,9 @@ lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
     }
 
     ovn_dp_groups_init(&lflow_sync->all_dp_info[DP_SWITCH].dp_groups);
-    lflow_sync->all_dp_info[DP_SWITCH].datapaths = ls_datapaths;
+    lflow_sync->all_dp_info[DP_SWITCH].datapaths = &synced_lses->datapaths;
     ovn_dp_groups_init(&lflow_sync->all_dp_info[DP_ROUTER].dp_groups);
-    lflow_sync->all_dp_info[DP_ROUTER].datapaths = lr_datapaths;
+    lflow_sync->all_dp_info[DP_ROUTER].datapaths = &synced_lrs->datapaths;
 
     if (!sb_lflow_table) {
         return;
@@ -430,18 +430,17 @@ en_lflow_sync_run(struct engine_node *node, void *data)
         engine_get_input_data("datapath_synced_logical_router", node);
     const struct lflow_data *lflow_data =
         engine_get_input_data("lflow", node);
-    const struct northd_data *northd =
-        engine_get_input_data("northd", node);
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
     const struct sbrec_logical_dp_group_table *sb_dp_group_table =
         EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
     const struct engine_context *eng_ctx = engine_get_context();
 
+
     struct lflow_sync_data *lflow_sync = data;
     lflow_sync_data_destroy(lflow_sync);
     lflow_sync_data_init(lflow_sync, sb_lflow_table, lflow_data,
-                         &northd->ls_datapaths, &northd->lr_datapaths);
+                         synced_lses, synced_lrs);
 
     stopwatch_start(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
 

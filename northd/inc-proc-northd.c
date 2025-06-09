@@ -454,12 +454,6 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lflow_sync, &en_global_config,
                      node_global_config_handler);
     engine_add_input(&en_lflow_sync, &en_lflow, lflow_sync_lflow_handler);
-    /* en_lflow reacts to en_northd's changes and recalculates flows.
-     * en_lflow_sync needs en_northd's data, but only needs to handle the
-     * flow changes that en_northd caused in en_lflow. Changes in en_northd
-     * can be ignored, so we use engine_noop_handler here.
-     */
-    engine_add_input(&en_lflow_sync, &en_northd, engine_noop_handler);
     engine_add_input(&en_lflow_sync, &en_sb_logical_dp_group, NULL);
 
     engine_add_input(&en_sync_to_sb_addr_set, &en_northd, NULL);
@@ -487,6 +481,10 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_sync_to_sb_lb, &en_sb_load_balancer,
                      sync_to_sb_lb_sb_load_balancer);
     engine_add_input(&en_sync_to_sb_lb, &en_sb_logical_dp_group, NULL);
+    engine_add_input(&en_sync_to_sb_lb, &en_datapath_synced_logical_router,
+                     engine_noop_handler);
+    engine_add_input(&en_sync_to_sb_lb, &en_datapath_synced_logical_switch,
+                     engine_noop_handler);
 
     engine_add_input(&en_sync_to_sb_pb, &en_northd,
                      sync_to_sb_pb_northd_handler);

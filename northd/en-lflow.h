@@ -49,7 +49,7 @@ lflow_group_ecmp_route_change_handler(struct engine_node *node, void *data);
 struct sb_lflows;
 struct dp_info {
     struct hmap dp_groups;
-    const struct ovn_datapaths *datapaths;
+    const struct ovn_datapath_binding_hashvec *datapaths;
 };
 
 struct lflow_sync_data {
