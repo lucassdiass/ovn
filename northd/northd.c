@@ -578,11 +578,29 @@ ovn_datapath_find_by_key(struct hmap *datapaths, uint32_t dp_key)
 }
 
 struct ovn_datapath *
+ovn_datapath_from_sbrec_(const struct hmap *datapaths,
+                         const struct sbrec_datapath_binding *sb)
+{
+    struct uuid key;
+
+    if (!uuid_from_string(&key, sb->nb_uuid)) {
+        /* This was inserted by something other than ovn-northd. */
+        return NULL;
+    }
+
+    struct ovn_datapath *od = ovn_datapath_find_(datapaths, &key);
+    if (od && (od->sb == sb)) {
+        return od;
+    }
+
+    return NULL;
+}
+
+struct ovn_datapath *
 ovn_datapath_from_sbrec(const struct hmap *ls_datapaths,
                         const struct hmap *lr_datapaths,
                         const struct sbrec_datapath_binding *sb)
 {
-    struct uuid key;
     const struct hmap *dps;
 
     if (!strcmp(sb->type, "logical-switch")) {
@@ -593,15 +611,7 @@ ovn_datapath_from_sbrec(const struct hmap *ls_datapaths,
         return NULL;
     }
 
-    if (!uuid_from_string(&key, sb->nb_uuid)) {
-        return NULL;
-    }
-    struct ovn_datapath *od = ovn_datapath_find_(dps, &key);
-    if (od && (od->sb == sb)) {
-        return od;
-    }
-
-    return NULL;
+    return ovn_datapath_from_sbrec_(dps, sb);
 }
 
 static bool
@@ -2027,8 +2037,7 @@ join_logical_ports(
     struct shash_node *node;
     SHASH_FOR_EACH (node, &paired_lrps->paired_router_ports) {
         struct ovn_paired_logical_router_port *slrp = node->data;
-        od = ovn_datapath_from_sbrec(ls_datapaths, lr_datapaths,
-                                     slrp->router->sb);
+        od = ovn_datapath_from_sbrec_(lr_datapaths, slrp->router->sb);
         if (!od) {
             /* This can happen if the router is not enabled */
             continue;
@@ -2047,10 +2056,10 @@ join_logical_ports(
 
     SHASH_FOR_EACH (node, &paired_lsps->paired_switch_ports) {
         struct ovn_paired_logical_switch_port *slsp = node->data;
-        od = ovn_datapath_from_sbrec(ls_datapaths, lr_datapaths,
-                                     slsp->sw->sb);
+        od = ovn_datapath_from_sbrec_(ls_datapaths, slsp->sw->sb);
 
         ovs_assert(od);
+
         join_logical_ports_lsp(ls_ports, od, slsp->nb, slsp->sb,
                                slsp->nb->name, queue_id_bitmap,
                                tag_alloc_table);
@@ -3133,7 +3142,7 @@ cleanup_mac_bindings(
     const struct sbrec_mac_binding *b;
     SBREC_MAC_BINDING_TABLE_FOR_EACH_SAFE (b, sbrec_mac_binding_table) {
         const struct ovn_datapath *od =
-            ovn_datapath_from_sbrec(NULL, lr_datapaths, b->datapath);
+            ovn_datapath_from_sbrec_(lr_datapaths, b->datapath);
 
         if (!od || ovn_datapath_is_stale(od) ||
                 !ovn_port_find(lr_ports, b->logical_port)) {
@@ -18456,7 +18465,7 @@ build_ip_mcast(struct ovsdb_idl_txn *ovnsb_txn,
     const struct sbrec_ip_multicast *sb;
 
     SBREC_IP_MULTICAST_TABLE_FOR_EACH_SAFE (sb, sbrec_ip_multicast_table) {
-        od = ovn_datapath_from_sbrec(ls_datapaths, NULL, sb->datapath);
+        od = ovn_datapath_from_sbrec_(ls_datapaths, sb->datapath);
         if (!od || ovn_datapath_is_stale(od)) {
             sbrec_ip_multicast_delete(sb);
         }
