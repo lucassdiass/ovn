@@ -42,10 +42,10 @@ void lflow_table_set_size(struct lflow_table *, size_t);
  * lflow_tables.
  */
 struct sb_lflows;
+struct dp_info;
 void lflow_table_sync_to_sb(struct lflow_table *,
                             struct ovsdb_idl_txn *ovnsb_txn,
-                            const struct ovn_datapaths *ls_datapaths,
-                            const struct ovn_datapaths *lr_datapaths,
+                            struct dp_info *all_dp_info,
                             bool ovn_internal_version_changed,
                             struct sb_lflows *sb_lflows,
                             const struct sbrec_logical_dp_group_table *);
@@ -66,8 +66,7 @@ void lflow_ref_unlink_lflows(struct lflow_ref *);
 bool lflow_ref_sync_lflows(struct lflow_ref *,
                            struct lflow_table *lflow_table,
                            struct ovsdb_idl_txn *ovnsb_txn,
-                           const struct ovn_datapaths *ls_datapaths,
-                           const struct ovn_datapaths *lr_datapaths,
+                           struct dp_info *all_dp_info,
                            bool ovn_internal_version_changed,
                            const struct sbrec_logical_flow_table *,
                            const struct sbrec_logical_dp_group_table *);

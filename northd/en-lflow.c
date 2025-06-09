@@ -373,7 +373,9 @@ sb_lflows_sync_for_datapaths(
 static void
 lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
                      const struct sbrec_logical_flow_table *sb_lflow_table,
-                     const struct lflow_data *lflow_data)
+                     const struct lflow_data *lflow_data,
+                     const struct ovn_datapaths *ls_datapaths,
+                     const struct ovn_datapaths *lr_datapaths)
 {
     hmap_init(&lflow_sync->sb_lflows.valid);
     hmap_init(&lflow_sync->sb_lflows.to_delete);
@@ -381,6 +383,11 @@ lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
     if (lflow_data) {
         lflow_table_clear_dp_groups(lflow_data->lflow_table);
     }
+
+    ovn_dp_groups_init(&lflow_sync->all_dp_info[DP_SWITCH].dp_groups);
+    lflow_sync->all_dp_info[DP_SWITCH].datapaths = ls_datapaths;
+    ovn_dp_groups_init(&lflow_sync->all_dp_info[DP_ROUTER].dp_groups);
+    lflow_sync->all_dp_info[DP_ROUTER].datapaths = lr_datapaths;
 
     if (!sb_lflow_table) {
         return;
@@ -411,6 +418,9 @@ lflow_sync_data_destroy(struct lflow_sync_data *lflow_sync)
     }
     hmap_destroy(&lflow_sync->sb_lflows.valid);
     hmap_destroy(&lflow_sync->sb_lflows.to_delete);
+    for (enum ovn_datapath_type i = 0; i < DP_MAX; i++) {
+        ovn_dp_groups_destroy(&lflow_sync->all_dp_info[i].dp_groups);
+    }
 }
 
 enum engine_node_state
@@ -422,12 +432,7 @@ en_lflow_sync_run(struct engine_node *node, void *data)
         engine_get_input_data("datapath_synced_logical_switch", node);
     const struct ovn_synced_logical_router_map *synced_lrs =
         engine_get_input_data("datapath_synced_logical_router", node);
-    /* XXX The lflow table is currently not treated as const because it
-     * contains mutable logical datapath groups. A future commit will
-     * separate the dp groups from the lflow_table so that this can be
-     * treated as const.
-     */
-    struct lflow_data *lflow_data =
+    const struct lflow_data *lflow_data =
         engine_get_input_data("lflow", node);
     const struct northd_data *northd =
         engine_get_input_data("northd", node);
@@ -439,15 +444,15 @@ en_lflow_sync_run(struct engine_node *node, void *data)
 
     struct lflow_sync_data *lflow_sync = data;
     lflow_sync_data_destroy(lflow_sync);
-    lflow_sync_data_init(lflow_sync, sb_lflow_table, lflow_data);
+    lflow_sync_data_init(lflow_sync, sb_lflow_table, lflow_data,
+                         &northd->ls_datapaths, &northd->lr_datapaths);
 
     stopwatch_start(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
 
     sb_lflows_sync_for_datapaths(synced_lses, synced_lrs,
                                  &lflow_sync->sb_lflows);
     lflow_table_sync_to_sb(lflow_data->lflow_table, eng_ctx->ovnsb_idl_txn,
-                           &northd->ls_datapaths,
-                           &northd->lr_datapaths,
+                           lflow_sync->all_dp_info,
                            global_config->ovn_internal_version_changed,
                            &lflow_sync->sb_lflows, sb_dp_group_table);
     lflow_table_sync_finish(&lflow_sync->sb_lflows);
@@ -467,7 +472,7 @@ en_lflow_sync_init(struct engine_node *node OVS_UNUSED,
                         struct engine_arg *arg OVS_UNUSED)
 {
     struct lflow_sync_data *lflow_sync = xzalloc(sizeof *lflow_sync);
-    lflow_sync_data_init(lflow_sync, NULL, NULL);
+    lflow_sync_data_init(lflow_sync, NULL, NULL, NULL, NULL);
     return lflow_sync;
 }
 
@@ -479,19 +484,20 @@ en_lflow_sync_cleanup(void *data)
 }
 
 enum engine_input_handler_result
-lflow_sync_lflow_handler(struct engine_node *node, void *data OVS_UNUSED)
+lflow_sync_lflow_handler(struct engine_node *node, void *data)
 {
     const struct sbrec_logical_flow_table *sb_lflow_table =
         EN_OVSDB_GET(engine_get_input("SB_logical_flow", node));
-    /* XXX The lflow table is currently not treated as const because it
-     * contains mutable logical datapath groups. A future commit will
-     * separate the dp groups from the lflow_table so that this can be
-     * treated as const.
+    /* The "const" designation is a bit of a misnomer. None of the fields
+     * of lflow_data are changed by this node. However, the following
+     * changes can be made to its components:
+     *  * The lflow_data->lflow_table can have lflows removed as a result
+     *    of syncing.
+     *  * The lflows within the lflow_table can have their "dpg" field
+     *    updated as a result of datapath group changes from syncing.
      */
-    struct lflow_data *lflow_data =
+    const struct lflow_data *lflow_data =
         engine_get_input_data("lflow", node);
-    const struct northd_data *northd =
-        engine_get_input_data("northd", node);
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
     const struct sbrec_logical_dp_group_table *sb_dp_group_table =
@@ -506,6 +512,7 @@ lflow_sync_lflow_handler(struct engine_node *node, void *data OVS_UNUSED)
         return EN_UNHANDLED;
     }
 
+    struct lflow_sync_data *lflow_sync = data;
     struct lflow_ref *lflow_ref;
     bool handled = true;
     VECTOR_FOR_EACH (&lflow_data->lflow_refs, lflow_ref) {
@@ -519,7 +526,7 @@ lflow_sync_lflow_handler(struct engine_node *node, void *data OVS_UNUSED)
          */
         handled &= lflow_ref_sync_lflows(
             lflow_ref, lflow_data->lflow_table, eng_ctx->ovnsb_idl_txn,
-            &northd->ls_datapaths, &northd->lr_datapaths,
+            lflow_sync->all_dp_info,
             global_config->ovn_internal_version_changed, sb_lflow_table,
             sb_dp_group_table);
     }

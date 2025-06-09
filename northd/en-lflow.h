@@ -47,8 +47,14 @@ enum engine_input_handler_result
 lflow_group_ecmp_route_change_handler(struct engine_node *node, void *data);
 
 struct sb_lflows;
+struct dp_info {
+    struct hmap dp_groups;
+    const struct ovn_datapaths *datapaths;
+};
+
 struct lflow_sync_data {
     struct sb_lflows sb_lflows;
+    struct dp_info all_dp_info[DP_MAX];
 };
 
 enum engine_node_state en_lflow_sync_run(struct engine_node *, void *data);
