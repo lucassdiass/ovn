@@ -793,8 +793,7 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
             sb_lb->ls_dpg = ovn_dp_group_create(
                 ovnsb_txn, &sb_lbs->ls_dp_groups, sbrec_ls_dp_group,
                 lb_dps->n_nb_ls, lb_dps->nb_ls_map,
-                ods_size(ls_datapaths), true,
-                ls_datapaths, lr_datapaths);
+                ods_size(ls_datapaths), ls_datapaths);
         }
 
         if (chassis_features->ls_dpg_column) {
@@ -848,8 +847,7 @@ sync_sb_lb_record(struct sb_lb_record *sb_lb,
             sb_lb->lr_dpg = ovn_dp_group_create(
                 ovnsb_txn, &sb_lbs->lr_dp_groups, sbrec_lr_dp_group,
                 lb_dps->n_nb_lr, lb_dps->nb_lr_map,
-                ods_size(lr_datapaths), false,
-                ls_datapaths, lr_datapaths);
+                ods_size(lr_datapaths), lr_datapaths);
         }
 
         sbrec_load_balancer_set_lr_datapath_group(sbrec_lb,
