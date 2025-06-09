@@ -17795,8 +17795,7 @@ void run_update_worker_pool(int n_threads)
 
 /* Updates the Logical_Flow and Multicast_Group tables in the OVN_SB database,
  * constructing their contents based on the OVN_NB database. */
-void build_lflows(struct ovsdb_idl_txn *ovnsb_txn,
-                  struct lflow_input *input_data,
+void build_lflows(struct lflow_input *input_data,
                   struct lflow_table *lflows)
 {
     build_lswitch_and_lrouter_flows(input_data->ls_datapaths,
@@ -17829,15 +17828,6 @@ void build_lflows(struct ovsdb_idl_txn *ovnsb_txn,
     /* Parallel build may result in a suboptimal hash. Resize the
      * lflow map to a correct size before doing lookups */
     lflow_table_expand(lflows);
-    
-    stopwatch_start(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
-    lflow_table_sync_to_sb(lflows, ovnsb_txn, input_data->ls_datapaths,
-                           input_data->lr_datapaths,
-                           input_data->ovn_internal_version_changed,
-                           input_data->sbrec_logical_flow_table,
-                           input_data->sbrec_logical_dp_group_table);
-
-    stopwatch_stop(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
 }
 
 void

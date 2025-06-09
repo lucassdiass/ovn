@@ -51,13 +51,6 @@ northd_output_sync_to_sb_handler(struct engine_node *node OVS_UNUSED,
 }
 
 enum engine_input_handler_result
-northd_output_lflow_handler(struct engine_node *node OVS_UNUSED,
-                            void *data OVS_UNUSED)
-{
-    return EN_HANDLED_UPDATED;
-}
-
-enum engine_input_handler_result
 northd_output_mac_binding_aging_handler(struct engine_node *node OVS_UNUSED,
                                         void *data OVS_UNUSED)
 {
@@ -88,6 +81,13 @@ northd_output_acl_id_handler(struct engine_node *node OVS_UNUSED,
 enum engine_input_handler_result
 northd_output_advertised_route_sync_handler(
     struct engine_node *node OVS_UNUSED, void *data OVS_UNUSED)
+{
+    return EN_HANDLED_UPDATED;
+}
+
+enum engine_input_handler_result
+northd_output_lflow_sync_handler(struct engine_node *node OVS_UNUSED,
+                                 void *data OVS_UNUSED)
 {
     return EN_HANDLED_UPDATED;
 }

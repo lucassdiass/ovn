@@ -107,8 +107,6 @@ lflow_get_input_data(struct engine_node *node,
 enum engine_node_state
 en_lflow_run(struct engine_node *node, void *data)
 {
-    const struct engine_context *eng_ctx = engine_get_context();
-
     struct lflow_input lflow_input;
     lflow_get_input_data(node, &lflow_input);
 
@@ -116,11 +114,11 @@ en_lflow_run(struct engine_node *node, void *data)
 
     struct lflow_data *lflow_data = data;
     lflow_table_clear(lflow_data->lflow_table);
+    lflow_data->handled_incrementally = false;
     lflow_reset_northd_refs(&lflow_input);
     lflow_ref_clear(lflow_input.igmp_lflow_ref);
 
-    build_lflows(eng_ctx->ovnsb_idl_txn, &lflow_input,
-                 lflow_data->lflow_table);
+    build_lflows(&lflow_input, lflow_data->lflow_table);
     stopwatch_stop(BUILD_LFLOWS_STOPWATCH_NAME, time_msec());
 
     return EN_UPDATED;
@@ -342,4 +340,123 @@ void en_lflow_cleanup(void *data_)
 {
     struct lflow_data *data = data_;
     lflow_table_destroy(data->lflow_table);
+}
+
+void en_lflow_clear_tracked_data(void *data_)
+{
+    struct lflow_data *data = data_;
+    data->handled_incrementally = true;
+}
+
+static void
+lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
+                     const struct sbrec_logical_flow_table *sb_lflow_table)
+{
+    hmap_init(&lflow_sync->sb_lflows.valid);
+    hmap_init(&lflow_sync->sb_lflows.to_delete);
+
+    if (!sb_lflow_table) {
+        return;
+    }
+
+    const struct sbrec_logical_flow *lflow;
+    SBREC_LOGICAL_FLOW_TABLE_FOR_EACH (lflow, sb_lflow_table) {
+        struct sb_lflow *sb_lflow = xzalloc(sizeof *sb_lflow);
+        sb_lflow->flow = lflow;
+        sb_lflow->delete_me = true;
+        hmap_insert(&lflow_sync->sb_lflows.valid, &sb_lflow->hmap_node,
+                    uuid_hash(&lflow->header_.uuid));
+    }
+}
+
+static void
+lflow_sync_data_destroy(struct lflow_sync_data *lflow_sync)
+{
+    struct sb_lflow *sb_lflow;
+    HMAP_FOR_EACH_SAFE (sb_lflow, hmap_node, &lflow_sync->sb_lflows.valid) {
+        hmap_remove(&lflow_sync->sb_lflows.valid, &sb_lflow->hmap_node);
+        free(sb_lflow);
+    }
+    HMAP_FOR_EACH_SAFE (sb_lflow, hmap_node,
+                        &lflow_sync->sb_lflows.to_delete) {
+        hmap_remove(&lflow_sync->sb_lflows.to_delete, &sb_lflow->hmap_node);
+        free(sb_lflow);
+    }
+    hmap_destroy(&lflow_sync->sb_lflows.valid);
+    hmap_destroy(&lflow_sync->sb_lflows.to_delete);
+}
+
+enum engine_node_state
+en_lflow_sync_run(struct engine_node *node, void *data)
+{
+    const struct sbrec_logical_flow_table *sb_lflow_table =
+        EN_OVSDB_GET(engine_get_input("SB_logical_flow", node));
+    /* XXX The lflow table is currently not treated as const because it
+     * contains mutable logical datapath groups. A future commit will
+     * separate the dp groups from the lflow_table so that this can be
+     * treated as const.
+     */
+    struct lflow_data *lflow_data =
+        engine_get_input_data("lflow", node);
+    const struct northd_data *northd =
+        engine_get_input_data("northd", node);
+    struct ed_type_global_config *global_config =
+        engine_get_input_data("global_config", node);
+    const struct sbrec_logical_dp_group_table *sb_dp_group_table =
+        EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
+    const struct engine_context *eng_ctx = engine_get_context();
+
+    struct lflow_sync_data *lflow_sync = data;
+    lflow_sync_data_destroy(lflow_sync);
+    lflow_sync_data_init(lflow_sync, sb_lflow_table);
+
+    stopwatch_start(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
+
+    lflow_table_sync_to_sb(lflow_data->lflow_table, eng_ctx->ovnsb_idl_txn,
+                           &northd->ls_datapaths,
+                           &northd->lr_datapaths,
+                           global_config->ovn_internal_version_changed,
+                           &lflow_sync->sb_lflows, sb_dp_group_table);
+    lflow_table_sync_finish(&lflow_sync->sb_lflows);
+
+    struct sb_lflow *sb_lflow;
+    HMAP_FOR_EACH (sb_lflow, hmap_node, &lflow_sync->sb_lflows.to_delete) {
+        sbrec_logical_flow_delete(sb_lflow->flow);
+    }
+
+    stopwatch_stop(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
+
+    return EN_UPDATED;
+}
+
+void *
+en_lflow_sync_init(struct engine_node *node OVS_UNUSED,
+                        struct engine_arg *arg OVS_UNUSED)
+{
+    struct lflow_sync_data *lflow_sync = xzalloc(sizeof *lflow_sync);
+    lflow_sync_data_init(lflow_sync, NULL);
+    return lflow_sync;
+}
+
+void
+en_lflow_sync_cleanup(void *data)
+{
+    struct lflow_sync_data *lflow_sync = data;
+    lflow_sync_data_destroy(lflow_sync);
+}
+
+enum engine_input_handler_result
+lflow_sync_lflow_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct lflow_data *lflow_data = engine_get_input_data("lflow", node);
+
+    /* The en-lflow node's handlers sync flows based on lflow_refs. If they
+     * were all able to handle the changes incrementally, then there's no need
+     * for en-lflow-sync to perform a sync of the entire lflow table.
+     */
+    if (lflow_data->handled_incrementally) {
+        return EN_HANDLED_UPDATED;
+    } else {
+        return EN_UNHANDLED;
+    }
 }

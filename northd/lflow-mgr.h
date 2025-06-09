@@ -33,13 +33,23 @@ void lflow_table_clear(struct lflow_table *);
 void lflow_table_destroy(struct lflow_table *);
 void lflow_table_expand(struct lflow_table *);
 void lflow_table_set_size(struct lflow_table *, size_t);
+
+/* To sync lflows from a struct lflow_table to the southbound database,
+ * lflow_table_sync_to_sb() may be called multiple times, passing different
+ * lflow_tables in each time. Once all lflow_tables have been synced to the
+ * southbound database, call lflow_table_sync_finish() to free memory and
+ * delete any southbound logical flows that did not match any of the
+ * lflow_tables.
+ */
+struct sb_lflows;
 void lflow_table_sync_to_sb(struct lflow_table *,
                             struct ovsdb_idl_txn *ovnsb_txn,
                             const struct ovn_datapaths *ls_datapaths,
                             const struct ovn_datapaths *lr_datapaths,
                             bool ovn_internal_version_changed,
-                            const struct sbrec_logical_flow_table *,
+                            struct sb_lflows *sb_lflows,
                             const struct sbrec_logical_dp_group_table *);
+void lflow_table_sync_finish(struct sb_lflows *sb_lflows);
 void lflow_table_destroy(struct lflow_table *);
 
 void lflow_hash_lock_init(void);
@@ -163,6 +173,25 @@ struct ovn_dp_group {
     struct hmap_node node;
     size_t refcnt;
 };
+
+/* Structure that allows for struct sbrec_logical_flow to be placed
+ * in an hmap. The hash is based on the UUID of the flow.
+ */
+struct sb_lflow {
+    const struct sbrec_logical_flow *flow;
+    struct hmap_node hmap_node;
+    bool delete_me;
+};
+
+struct sb_lflows {
+    /* struct sb_lflow that have not yet been ruled invalid. */
+    struct hmap valid;
+    /* struct sb_lflow that have been determined to be invalid
+     * and should be deleted.
+     */
+    struct hmap to_delete;
+};
+
 
 static inline void
 ovn_dp_groups_init(struct hmap *dp_groups)

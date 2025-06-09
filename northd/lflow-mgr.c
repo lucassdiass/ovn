@@ -26,6 +26,7 @@
 #include "lflow-mgr.h"
 #include "lib/ovn-parallel-hmap.h"
 #include "lib/ovn-util.h"
+#include "en-datapath-logical-switch.h"
 
 VLOG_DEFINE_THIS_MODULE(lflow_mgr);
 
@@ -254,7 +255,7 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
                        const struct ovn_datapaths *ls_datapaths,
                        const struct ovn_datapaths *lr_datapaths,
                        bool ovn_internal_version_changed,
-                       const struct sbrec_logical_flow_table *sb_flow_table,
+                       struct sb_lflows *sb_lflows,
                        const struct sbrec_logical_dp_group_table *dpgrp_table)
 {
     struct hmap lflows_temp = HMAP_INITIALIZER(&lflows_temp);
@@ -265,8 +266,9 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
                        lflow_table->max_seen_lflow_size);
 
     /* Push changes to the Logical_Flow table to database. */
-    const struct sbrec_logical_flow *sbflow;
-    SBREC_LOGICAL_FLOW_TABLE_FOR_EACH_SAFE (sbflow, sb_flow_table) {
+    struct sb_lflow *sb_lflow;
+    HMAP_FOR_EACH (sb_lflow, hmap_node, &sb_lflows->valid) {
+        const struct sbrec_logical_flow *sbflow = sb_lflow->flow;
         struct sbrec_logical_dp_group *dp_group = sbflow->logical_dp_group;
         struct ovn_datapath *logical_datapath_od = NULL;
         size_t i;
@@ -294,7 +296,6 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
 
         if (!logical_datapath_od) {
             /* This lflow has no valid logical datapaths. */
-            sbrec_logical_flow_delete(sbflow);
             continue;
         }
 
@@ -326,8 +327,7 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
             hmap_remove(lflows, &lflow->hmap_node);
             hmap_insert(&lflows_temp, &lflow->hmap_node,
                         hmap_node_hash(&lflow->hmap_node));
-        } else {
-            sbrec_logical_flow_delete(sbflow);
+            sb_lflow->delete_me = false;
         }
     }
 
@@ -348,8 +348,21 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
         hmap_insert(&lflows_temp, &lflow->hmap_node,
                     hmap_node_hash(&lflow->hmap_node));
     }
+
     hmap_swap(lflows, &lflows_temp);
     hmap_destroy(&lflows_temp);
+}
+
+void lflow_table_sync_finish(struct sb_lflows *sb_lflows)
+{
+    struct sb_lflow *sb_lflow;
+    HMAP_FOR_EACH_SAFE (sb_lflow, hmap_node, &sb_lflows->valid) {
+        if (sb_lflow->delete_me) {
+            hmap_remove(&sb_lflows->valid, &sb_lflow->hmap_node);
+            hmap_insert(&sb_lflows->to_delete, &sb_lflow->hmap_node,
+                        hmap_node_hash(&sb_lflow->hmap_node));
+        }
+    }
 }
 
 /* Logical flow sync using 'struct lflow_ref'

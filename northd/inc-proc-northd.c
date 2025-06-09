@@ -159,7 +159,7 @@ enum sb_engine_node {
 static ENGINE_NODE(northd, CLEAR_TRACKED_DATA);
 static ENGINE_NODE(sync_from_sb);
 static ENGINE_NODE(sampling_app);
-static ENGINE_NODE(lflow);
+static ENGINE_NODE(lflow, CLEAR_TRACKED_DATA);
 static ENGINE_NODE(mac_binding_aging);
 static ENGINE_NODE(mac_binding_aging_waker);
 static ENGINE_NODE(northd_output);
@@ -201,6 +201,7 @@ static ENGINE_NODE(port_binding_paired_logical_switch_port);
 static ENGINE_NODE(port_binding_paired_chassisredirect_port);
 static ENGINE_NODE(port_binding_paired_mirror);
 static ENGINE_NODE(port_binding_pair);
+static ENGINE_NODE(lflow_sync);
 
 void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                           struct ovsdb_idl_loop *sb)
@@ -445,6 +446,18 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                      lflow_multicast_igmp_handler);
     engine_add_input(&en_lflow, &en_sb_acl_id, NULL);
 
+    engine_add_input(&en_lflow_sync, &en_sb_logical_flow, NULL);
+    engine_add_input(&en_lflow_sync, &en_global_config,
+                     node_global_config_handler);
+    engine_add_input(&en_lflow_sync, &en_lflow, lflow_sync_lflow_handler);
+    /* en_lflow reacts to en_northd's changes and recalculates flows.
+     * en_lflow_sync needs en_northd's data, but only needs to handle the
+     * flow changes that en_northd caused in en_lflow. Changes in en_northd
+     * can be ignored, so we use engine_noop_handler here.
+     */
+    engine_add_input(&en_lflow_sync, &en_northd, engine_noop_handler);
+    engine_add_input(&en_lflow_sync, &en_sb_logical_dp_group, NULL);
+
     engine_add_input(&en_sync_to_sb_addr_set, &en_northd, NULL);
     engine_add_input(&en_sync_to_sb_addr_set, &en_lr_stateful, NULL);
     engine_add_input(&en_sync_to_sb_addr_set, &en_sb_address_set, NULL);
@@ -496,8 +509,6 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_northd_output, &en_sync_from_sb, NULL);
     engine_add_input(&en_northd_output, &en_sync_to_sb,
                      northd_output_sync_to_sb_handler);
-    engine_add_input(&en_northd_output, &en_lflow,
-                     northd_output_lflow_handler);
     engine_add_input(&en_northd_output, &en_mac_binding_aging,
                      northd_output_mac_binding_aging_handler);
     engine_add_input(&en_northd_output, &en_fdb_aging,
@@ -508,6 +519,9 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                      northd_output_acl_id_handler);
     engine_add_input(&en_northd_output, &en_advertised_route_sync,
                      northd_output_advertised_route_sync_handler);
+    engine_add_input(&en_northd_output, &en_lflow_sync,
+                     northd_output_lflow_sync_handler);
+
 
     struct engine_arg engine_arg = {
         .nb_idl = nb->idl,
