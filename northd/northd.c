@@ -349,18 +349,33 @@ static const char *reg_ct_state[] = {
 #define ROUTE_PRIO_OFFSET_STATIC 4
 #define ROUTE_PRIO_OFFSET_CONNECTED 6
 
+/* ovn_stages used by northd for logical switches and logical routers.
+ * The first three components are combined to form the constant stage's
+ * struct name, e.g. S_SWITCH_IN_PORT_SEC_L2, S_ROUTER_OUT_DELIVERY.
+ */
+#define PIPELINE_STAGE(DP_TYPE, PIPELINE, STAGE, TABLE, NAME)   \
+    static const struct ovn_stage T_##DP_TYPE##_##PIPELINE##_##STAGE = {   \
+        DP_##DP_TYPE, P_##PIPELINE, TABLE, NAME                       \
+    };                                                                \
+    static const struct ovn_stage *S_##DP_TYPE##_##PIPELINE##_##STAGE = \
+        &T_##DP_TYPE##_##PIPELINE##_##STAGE;
+    PIPELINE_STAGES
+#undef PIPELINE_STAGE
+
 /* Returns the type of the datapath to which a flow with the given 'stage' may
  * be added. */
 enum ovn_datapath_type
-ovn_stage_to_datapath_type(enum ovn_stage stage)
+ovn_stage_to_datapath_type(const struct ovn_stage *stage)
 {
-    switch (stage) {
-#define PIPELINE_STAGE(DP_TYPE, PIPELINE, STAGE, TABLE, NAME)       \
-        case S_##DP_TYPE##_##PIPELINE##_##STAGE: return DP_##DP_TYPE;
-    PIPELINE_STAGES
-#undef PIPELINE_STAGE
-    default: OVS_NOT_REACHED();
-    }
+    return stage->dp_type;
+}
+
+bool
+ovn_stage_equal(const struct ovn_stage *a, const struct ovn_stage *b)
+{
+    return a->dp_type == b->dp_type &&
+           a->pipeline == b->pipeline &&
+           a->table == b->table;
 }
 
 static uint32_t
@@ -5253,7 +5268,7 @@ build_mirror_lflow(struct ovn_port *op,
 {
     struct ds match = DS_EMPTY_INITIALIZER;
     struct ds action = DS_EMPTY_INITIALIZER;
-    enum ovn_stage stage;
+    const struct ovn_stage *stage;
     const char *dir;
     uint32_t priority = OVN_LPORT_MIRROR_OFFSET + rule->priority;
 
@@ -5285,7 +5300,7 @@ build_mirror_pass_lflow(struct ovn_port *op,
 {
     struct ds match = DS_EMPTY_INITIALIZER;
     struct ds action = DS_EMPTY_INITIALIZER;
-    enum ovn_stage stage;
+    const struct ovn_stage *stage;
     const char *dir;
 
     if (egress) {
@@ -5554,8 +5569,9 @@ build_lswitch_output_port_sec_od(struct ovn_datapath *od,
 
 static void
 skip_port_from_conntrack(const struct ovn_datapath *od, struct ovn_port *op,
-                         bool has_stateful_acl, enum ovn_stage in_stage,
-                         enum ovn_stage out_stage, uint16_t priority,
+                         bool has_stateful_acl,
+                         const struct ovn_stage *in_stage,
+                         const struct ovn_stage *out_stage, uint16_t priority,
                          struct lflow_table *lflows,
                          struct lflow_ref *lflow_ref)
 {
@@ -6009,13 +6025,13 @@ build_acl_hints(const struct ls_stateful_record *ls_stateful_rec,
      * corresponding to all potential matches are set.
      */
 
-    enum ovn_stage stages[] = {
+    const struct ovn_stage *stages[] = {
         S_SWITCH_IN_ACL_HINT,
         S_SWITCH_OUT_ACL_HINT,
     };
 
     for (size_t i = 0; i < ARRAY_SIZE(stages); i++) {
-        enum ovn_stage stage = stages[i];
+        const struct ovn_stage *stage = stages[i];
 
         /* In any case, advance to the next stage. */
         if (!ls_stateful_rec->has_acls && !ls_stateful_rec->has_lb_vip) {
@@ -6297,7 +6313,7 @@ build_acl_sample_label_match(struct ds *match, const struct nbrec_acl *acl,
 static void
 build_acl_sample_new_flows(const struct ovn_datapath *od,
                            struct lflow_table *lflows,
-                           enum ovn_stage stage,
+                           const struct ovn_stage *stage,
                            struct ds *match, struct ds *actions,
                            const struct nbrec_acl *acl,
                            uint8_t sample_domain_id, bool stateful,
@@ -6335,7 +6351,7 @@ build_acl_sample_new_flows(const struct ovn_datapath *od,
 static void
 build_acl_sample_est_orig_stateful_flows(const struct ovn_datapath *od,
                                          struct lflow_table *lflows,
-                                         enum ovn_stage stage,
+                                         const struct ovn_stage *stage,
                                          struct ds *match, struct ds *actions,
                                          const struct nbrec_acl *acl,
                                          uint8_t sample_domain_id,
@@ -6368,7 +6384,7 @@ build_acl_sample_est_orig_stateful_flows(const struct ovn_datapath *od,
 static void
 build_acl_sample_est_rpl_stateful_flows(const struct ovn_datapath *od,
                                         struct lflow_table *lflows,
-                                        enum ovn_stage rpl_stage,
+                                        const struct ovn_stage *rpl_stage,
                                         struct ds *match, struct ds *actions,
                                         const struct nbrec_acl *acl,
                                         uint8_t sample_domain_id,
@@ -6396,7 +6412,7 @@ build_acl_sample_est_rpl_stateful_flows(const struct ovn_datapath *od,
 static void
 build_acl_sample_est_stateful_flows(const struct ovn_datapath *od,
                                     struct lflow_table *lflows,
-                                    enum ovn_stage stage,
+                                    const struct ovn_stage *stage,
                                     struct ds *match, struct ds *actions,
                                     const struct nbrec_acl *acl,
                                     uint8_t sample_domain_id,
@@ -6410,9 +6426,9 @@ build_acl_sample_est_stateful_flows(const struct ovn_datapath *od,
 
     /* Install flows in the "opposite" pipeline direction to handle reply
      * traffic on established connections. */
-    enum ovn_stage rpl_stage = (stage == S_SWITCH_OUT_ACL_SAMPLE
-                                ? S_SWITCH_IN_ACL_SAMPLE
-                                : S_SWITCH_OUT_ACL_SAMPLE);
+    const struct ovn_stage *rpl_stage = (stage == S_SWITCH_OUT_ACL_SAMPLE
+                                         ? S_SWITCH_IN_ACL_SAMPLE
+                                         : S_SWITCH_OUT_ACL_SAMPLE);
     build_acl_sample_est_rpl_stateful_flows(od, lflows, rpl_stage,
                                             match, actions,
                                             acl, sample_domain_id, lflow_ref);
@@ -6427,7 +6443,7 @@ static void build_acl_reject_action(struct ds *actions, bool is_ingress);
 static void
 build_acl_sample_generic_new_flows(const struct ovn_datapath *od,
                                    struct lflow_table *lflows,
-                                   enum ovn_stage stage,
+                                   const struct ovn_stage *stage,
                                    enum acl_observation_stage obs_stage,
                                    struct ds *match, struct ds *actions,
                                    const struct nbrec_sample_collector *coll,
@@ -6474,7 +6490,7 @@ build_acl_sample_generic_new_flows(const struct ovn_datapath *od,
 static void
 build_acl_sample_generic_est_flows(const struct ovn_datapath *od,
                                    struct lflow_table *lflows,
-                                   enum ovn_stage stage,
+                                   const struct ovn_stage *stage,
                                    enum acl_observation_stage obs_stage,
                                    struct ds *match, struct ds *actions,
                                    const struct nbrec_sample_collector *coll,
@@ -6505,9 +6521,9 @@ build_acl_sample_generic_est_flows(const struct ovn_datapath *od,
     ovn_lflow_add(lflows, od, stage, 1000, ds_cstr(match),
                   ds_cstr(actions), lflow_ref);
 
-    enum ovn_stage rpl_stage = (stage == S_SWITCH_OUT_ACL_SAMPLE
-                                ? S_SWITCH_IN_ACL_SAMPLE
-                                : S_SWITCH_OUT_ACL_SAMPLE);
+    const struct ovn_stage *rpl_stage = (stage == S_SWITCH_OUT_ACL_SAMPLE
+                                         ? S_SWITCH_IN_ACL_SAMPLE
+                                         : S_SWITCH_OUT_ACL_SAMPLE);
 
     ds_truncate(match, match_len);
     ds_put_format(match, "ct.rpl && ct_mark.obs_collector_id == %"PRIu8,
@@ -6560,7 +6576,7 @@ build_acl_sample_flows(const struct ls_stateful_record *ls_stateful_rec,
     }
 
     bool ingress = !strcmp(acl->direction, "from-lport") ? true : false;
-    enum ovn_stage stage;
+    const struct ovn_stage *stage;
     enum acl_observation_stage obs_stage;
 
     if (ingress && smap_get_bool(&acl->options, "apply-after-lb", false)) {
@@ -6633,7 +6649,7 @@ consider_acl(struct lflow_table *lflows, const struct ovn_datapath *od,
              const struct sbrec_acl_id_table *sbrec_acl_id_table)
 {
     bool ingress = !strcmp(acl->direction, "from-lport") ? true :false;
-    enum ovn_stage stage;
+    const struct ovn_stage *stage;
     enum acl_observation_stage obs_stage;
 
     if (ingress && smap_get_bool(&acl->options, "apply-after-lb", false)) {
@@ -6916,13 +6932,13 @@ build_acl_action_lflows(const struct ls_stateful_record *ls_stateful_rec,
                         struct ds *actions,
                         struct lflow_ref *lflow_ref)
 {
-    enum ovn_stage stages [] = {
+    const struct ovn_stage *stages [] = {
         S_SWITCH_IN_ACL_ACTION,
         S_SWITCH_IN_ACL_AFTER_LB_ACTION,
         S_SWITCH_OUT_ACL_ACTION,
     };
 
-    enum ovn_stage eval_stages[] = {
+    const struct ovn_stage *eval_stages[] = {
         S_SWITCH_IN_ACL_EVAL,
         S_SWITCH_IN_ACL_AFTER_LB_EVAL,
         S_SWITCH_OUT_ACL_EVAL,
@@ -6941,7 +6957,7 @@ build_acl_action_lflows(const struct ls_stateful_record *ls_stateful_rec,
 
     size_t verdict_len = actions->length;
     for (size_t i = 0; i < ARRAY_SIZE(stages); i++) {
-        enum ovn_stage stage = stages[i];
+        const struct ovn_stage *stage = stages[i];
         if (max_acl_tiers[i]) {
             ds_put_cstr(actions, REG_ACL_TIER " = 0; ");
         }
@@ -7031,7 +7047,7 @@ build_acl_log_related_flows(const struct ovn_datapath *od,
     /* Related/reply flows need to be set on the opposite pipeline
      * from where the ACL itself is set.
      */
-    enum ovn_stage log_related_stage = ingress ?
+    const struct ovn_stage *log_related_stage = ingress ?
         S_SWITCH_OUT_ACL_EVAL :
         S_SWITCH_IN_ACL_EVAL;
     ds_clear(match);
@@ -7378,7 +7394,9 @@ build_qos(struct ovn_datapath *od, struct lflow_table *lflows,
     for (size_t i = 0; i < od->nbs->n_qos_rules; i++) {
         struct nbrec_qos *qos = od->nbs->qos_rules[i];
         bool ingress = !strcmp(qos->direction, "from-lport") ? true :false;
-        enum ovn_stage stage = ingress ? S_SWITCH_IN_QOS : S_SWITCH_OUT_QOS;
+        const struct ovn_stage *stage = ingress
+            ? S_SWITCH_IN_QOS
+            : S_SWITCH_OUT_QOS;
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
         int64_t rate = 0;
         int64_t burst = 0;
@@ -12326,7 +12344,9 @@ lrouter_nat_add_ext_ip_match(const struct ovn_datapath *od,
                       allowed_ext_ips->name);
     } else if (exempted_ext_ips) {
         struct ds match_exempt = DS_EMPTY_INITIALIZER;
-        enum ovn_stage stage = is_src ? S_ROUTER_IN_DNAT : S_ROUTER_OUT_SNAT;
+        const struct ovn_stage *stage = is_src
+            ? S_ROUTER_IN_DNAT
+            : S_ROUTER_OUT_SNAT;
 
         /* Priority of logical flows corresponding to exempted_ext_ips is
          * +2 of the corresponding regular NAT rule.
@@ -12584,7 +12604,7 @@ build_lrouter_port_nat_arp_nd_flow(struct ovn_port *op,
 static void
 build_lrouter_drop_own_dest(struct ovn_port *op,
                             const struct lr_stateful_record *lr_stateful_rec,
-                            enum ovn_stage stage,
+                            const struct ovn_stage *stage,
                             uint16_t priority, bool drop_snat_ip,
                             struct lflow_table *lflows,
                             struct lflow_ref *lflow_ref)
@@ -13001,7 +13021,7 @@ build_gateway_get_l2_hdr_size(struct ovn_port *op)
  */
 static void OVS_PRINTF_FORMAT(10, 11)
 build_gateway_mtu_flow(struct lflow_table *lflows, struct ovn_port *op,
-                       enum ovn_stage stage, uint16_t prio_low,
+                       const struct ovn_stage *stage, uint16_t prio_low,
                        uint16_t prio_high, struct ds *match,
                        struct ds *actions, const struct ovsdb_idl_row *hint,
                        struct lflow_ref *lflow_ref,
@@ -14401,7 +14421,7 @@ create_icmp_need_frag_lflow(const struct ovn_port *op, int mtu,
                             struct ds *actions, struct ds *match,
                             const char *meter, struct lflow_table *lflows,
                             struct lflow_ref *lflow_ref,
-                            enum ovn_stage stage, uint16_t priority,
+                            const struct ovn_stage *stage, uint16_t priority,
                             bool is_ipv6, const char *extra_match,
                             const char *extra_action)
 {
@@ -14439,7 +14459,7 @@ static void
 build_icmperr_pkt_big_flows(struct ovn_port *op, int mtu,
                             struct lflow_table *lflows,
                             const struct shash *meter_groups, struct ds *match,
-                            struct ds *actions, enum ovn_stage stage,
+                            struct ds *actions, const struct ovn_stage *stage,
                             struct ovn_port *outport,
                             const char *ct_state_match,
                             struct lflow_ref *lflow_ref)

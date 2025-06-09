@@ -35,13 +35,13 @@ struct ovn_lflow;
 
 static void ovn_lflow_init(struct ovn_lflow *,
                            const struct sbrec_datapath_binding *sb_dp,
-                           size_t dp_bitmap_len, enum ovn_stage stage,
+                           size_t dp_bitmap_len, const struct ovn_stage *stage,
                            uint16_t priority, char *match,
                            char *actions, char *io_port,
                            char *ctrl_meter, char *stage_hint,
                            const char *where, const char *flow_desc);
 static struct ovn_lflow *ovn_lflow_find(const struct hmap *lflows,
-                                        enum ovn_stage stage,
+                                        const struct ovn_stage *stage,
                                         uint16_t priority, const char *match,
                                         const char *actions,
                                         const char *ctrl_meter, uint32_t hash);
@@ -51,7 +51,7 @@ static char *ovn_lflow_hint(const struct ovsdb_idl_row *row);
 
 static struct ovn_lflow *do_ovn_lflow_add(
     struct lflow_table *, size_t dp_bitmap_len, uint32_t hash,
-    enum ovn_stage stage, uint16_t priority, const char *match,
+    const struct ovn_stage *stage, uint16_t priority, const char *match,
     const char *actions, const char *io_port,
     const char *ctrl_meter,
     const struct ovsdb_idl_row *stage_hint,
@@ -164,7 +164,7 @@ struct ovn_lflow {
 
     const struct sbrec_datapath_binding *sb_dp;
     unsigned long *dpg_bitmap;   /* Bitmap of all datapaths by their 'index'.*/
-    enum ovn_stage stage;
+    const struct ovn_stage *stage;
     uint16_t priority;
     char *match;
     char *actions;
@@ -300,10 +300,11 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
          * datapaths, we should only get valid datapath types here.
          */
         ovs_assert(dp_type < DP_MAX);
+        struct ovn_stage stage = ovn_stage_build(dp_type, pipeline,
+                                                 sbflow->table_id);
 
         lflow = ovn_lflow_find(
-            lflows,
-            ovn_stage_build(dp_type, pipeline, sbflow->table_id),
+            lflows, &stage,
             sbflow->priority, sbflow->match, sbflow->actions,
             sbflow->controller_meter, sbflow->hash);
         if (lflow) {
@@ -685,7 +686,7 @@ void
 lflow_table_add_lflow(struct lflow_table *lflow_table,
                       const struct ovn_datapath *od,
                       const unsigned long *dp_bitmap, size_t dp_bitmap_len,
-                      enum ovn_stage stage, uint16_t priority,
+                      const struct ovn_stage *stage, uint16_t priority,
                       const char *match, const char *actions,
                       const char *io_port, const char *ctrl_meter,
                       const struct ovsdb_idl_row *stage_hint,
@@ -757,7 +758,7 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
 void
 lflow_table_add_lflow_default_drop(struct lflow_table *lflow_table,
                                    const struct ovn_datapath *od,
-                                   enum ovn_stage stage,
+                                   const struct ovn_stage *stage,
                                    const char *where,
                                    struct lflow_ref *lflow_ref)
 {
@@ -880,9 +881,9 @@ lflow_hash_lock_destroy(void)
 static void
 ovn_lflow_init(struct ovn_lflow *lflow,
                const struct sbrec_datapath_binding *sb_dp,
-               size_t dp_bitmap_len, enum ovn_stage stage, uint16_t priority,
-               char *match, char *actions, char *io_port, char *ctrl_meter,
-               char *stage_hint, const char *where,
+               size_t dp_bitmap_len, const struct ovn_stage *stage,
+               uint16_t priority, char *match, char *actions, char *io_port,
+               char *ctrl_meter, char *stage_hint, const char *where,
                const char *flow_desc)
 {
     lflow->dpg_bitmap = bitmap_allocate(dp_bitmap_len);
@@ -928,11 +929,11 @@ lflow_hash_unlock(struct ovs_mutex *hash_lock)
 }
 
 static bool
-ovn_lflow_equal(const struct ovn_lflow *a, enum ovn_stage stage,
+ovn_lflow_equal(const struct ovn_lflow *a, const struct ovn_stage *stage,
                 uint16_t priority, const char *match,
                 const char *actions, const char *ctrl_meter)
 {
-    return (a->stage == stage
+    return (ovn_stage_equal(a->stage, stage)
             && a->priority == priority
             && !strcmp(a->match, match)
             && !strcmp(a->actions, actions)
@@ -941,7 +942,7 @@ ovn_lflow_equal(const struct ovn_lflow *a, enum ovn_stage stage,
 
 static struct ovn_lflow *
 ovn_lflow_find(const struct hmap *lflows,
-               enum ovn_stage stage, uint16_t priority,
+               const struct ovn_stage *stage, uint16_t priority,
                const char *match, const char *actions,
                const char *ctrl_meter, uint32_t hash)
 {
@@ -984,8 +985,8 @@ ovn_lflow_destroy(struct lflow_table *lflow_table, struct ovn_lflow *lflow)
 
 static struct ovn_lflow *
 do_ovn_lflow_add(struct lflow_table *lflow_table, size_t dp_bitmap_len,
-                 uint32_t hash, enum ovn_stage stage, uint16_t priority,
-                 const char *match, const char *actions,
+                 uint32_t hash, const struct ovn_stage *stage,
+                 uint16_t priority, const char *match, const char *actions,
                  const char *io_port, const char *ctrl_meter,
                  const struct ovsdb_idl_row *stage_hint,
                  const char *where, const char *flow_desc)

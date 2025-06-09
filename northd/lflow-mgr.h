@@ -83,7 +83,7 @@ bool lflow_ref_sync_lflows(struct lflow_ref *,
 
 void lflow_table_add_lflow(struct lflow_table *, const struct ovn_datapath *,
                            const unsigned long *dp_bitmap,
-                           size_t dp_bitmap_len, enum ovn_stage stage,
+                           size_t dp_bitmap_len, const struct ovn_stage *stage,
                            uint16_t priority, const char *match,
                            const char *actions, const char *io_port,
                            const char *ctrl_meter,
@@ -92,7 +92,7 @@ void lflow_table_add_lflow(struct lflow_table *, const struct ovn_datapath *,
                            struct lflow_ref *);
 void lflow_table_add_lflow_default_drop(struct lflow_table *,
                                         const struct ovn_datapath *,
-                                        enum ovn_stage stage,
+                                        const struct ovn_stage *stage,
                                         const char *where,
                                         struct lflow_ref *);
 
