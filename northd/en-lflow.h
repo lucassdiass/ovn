@@ -15,8 +15,16 @@ struct sb_lflows;
 
 struct lflow_data {
     struct lflow_table *lflow_table;
-    /* This is set true if all of en-lflow's input handlers
-     * were able to handle northd's changes incrementally.
+    /* When en-lflow incrementally processes lflow_refs, it rebuilds
+     * the flows and adds the lflow_refs to this vector so that the
+     * en-lflow-sync node can resync the flows with the southbound
+     * database
+     */
+    struct vector lflow_refs;
+    /* Not all incremental changes in en-lflow affect the lflow_refs
+     * vector above. So we use this as a way of knowing for certain
+     * if en-lflow was able to handle all changes incrementally in
+     * nodes that take en-lflow as an input.
      */
     bool handled_incrementally;
 };

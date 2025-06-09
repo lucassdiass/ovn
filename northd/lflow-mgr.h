@@ -63,14 +63,6 @@ struct lflow_ref *lflow_ref_create(void);
 void lflow_ref_destroy(struct lflow_ref *);
 void lflow_ref_clear(struct lflow_ref *lflow_ref);
 void lflow_ref_unlink_lflows(struct lflow_ref *);
-bool lflow_ref_resync_flows(struct lflow_ref *,
-                            struct lflow_table *lflow_table,
-                            struct ovsdb_idl_txn *ovnsb_txn,
-                            const struct ovn_datapaths *ls_datapaths,
-                            const struct ovn_datapaths *lr_datapaths,
-                            bool ovn_internal_version_changed,
-                            const struct sbrec_logical_flow_table *,
-                            const struct sbrec_logical_dp_group_table *);
 bool lflow_ref_sync_lflows(struct lflow_ref *,
                            struct lflow_table *lflow_table,
                            struct ovsdb_idl_txn *ovnsb_txn,
@@ -227,5 +219,7 @@ dec_ovn_dp_group_ref(struct hmap *dp_groups, struct ovn_dp_group *dpg)
         free(dpg);
     }
 }
+
+void lflow_table_clear_dp_groups(const struct lflow_table *);
 
 #endif /* LFLOW_MGR_H */

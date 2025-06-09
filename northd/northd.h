@@ -866,23 +866,20 @@ void build_route_data_flows_for_lrouter(
     const struct group_ecmp_datapath *route_node,
     const struct sset *bfd_ports);
 
-
+struct lflow_data;
 bool lflow_handle_northd_port_changes(struct ovsdb_idl_txn *ovnsb_txn,
                                       struct tracked_ovn_ports *,
                                       struct lflow_input *,
-                                      struct lflow_table *lflows);
-bool lflow_handle_northd_lb_changes(struct ovsdb_idl_txn *ovnsb_txn,
-                                    struct tracked_lbs *,
+                                      struct lflow_data *lflow_data);
+bool lflow_handle_northd_lb_changes(struct tracked_lbs *,
                                     struct lflow_input *,
-                                    struct lflow_table *lflows);
-bool lflow_handle_lr_stateful_changes(struct ovsdb_idl_txn *,
-                                      struct lr_stateful_tracked_data *,
+                                    struct lflow_data *lflow_data);
+bool lflow_handle_lr_stateful_changes(struct lr_stateful_tracked_data *,
                                       struct lflow_input *,
-                                      struct lflow_table *lflows);
-bool lflow_handle_ls_stateful_changes(struct ovsdb_idl_txn *,
-                                      struct ls_stateful_tracked_data *,
+                                      struct lflow_data *lflow_data);
+bool lflow_handle_ls_stateful_changes(struct ls_stateful_tracked_data *,
                                       struct lflow_input *,
-                                      struct lflow_table *lflows);
+                                      struct lflow_data *lflow_data);
 bool northd_handle_sb_port_binding_changes(
     const struct sbrec_port_binding_table *, struct hmap *ls_ports,
     struct hmap *lr_ports);

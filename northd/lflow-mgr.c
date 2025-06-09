@@ -285,6 +285,9 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
     fast_hmap_size_for(&lflows_temp,
                        lflow_table->max_seen_lflow_size);
 
+    ovn_dp_groups_clear(&lflow_table->ls_dp_groups);
+    ovn_dp_groups_clear(&lflow_table->lr_dp_groups);
+
     /* Push changes to the Logical_Flow table to database. */
     struct sb_lflow *sb_lflow;
     HMAP_FOR_EACH (sb_lflow, hmap_node, &sb_lflows->valid) {
@@ -618,23 +621,6 @@ lflow_ref_unlink_lflows(struct lflow_ref *lflow_ref)
         }
         lrn->linked = false;
     }
-}
-
-bool
-lflow_ref_resync_flows(struct lflow_ref *lflow_ref,
-                       struct lflow_table *lflow_table,
-                       struct ovsdb_idl_txn *ovnsb_txn,
-                       const struct ovn_datapaths *ls_datapaths,
-                       const struct ovn_datapaths *lr_datapaths,
-                       bool ovn_internal_version_changed,
-                       const struct sbrec_logical_flow_table *sbflow_table,
-                       const struct sbrec_logical_dp_group_table *dpgrp_table)
-{
-    lflow_ref_unlink_lflows(lflow_ref);
-    return lflow_ref_sync_lflows__(lflow_ref, lflow_table, ovnsb_txn,
-                                   ls_datapaths, lr_datapaths,
-                                   ovn_internal_version_changed, sbflow_table,
-                                   dpgrp_table);
 }
 
 bool
@@ -1280,6 +1266,7 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
 {
     struct lflow_ref_node *lrn;
     struct ovn_lflow *lflow;
+    bool handled = true;
     HMAP_FOR_EACH_SAFE (lrn, ref_node, &lflow_ref->lflow_ref_nodes) {
         lflow = lrn->lflow;
         const struct sbrec_logical_flow *sblflow =
@@ -1305,10 +1292,9 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
             if (!sync_lflow_to_sb(lflow, ovnsb_txn, dp_groups, datapaths,
                                   ovn_internal_version_changed, sblflow,
                                   dpgrp_table)) {
-                return false;
+                handled = false;
             }
         }
-
         if (!lrn->linked) {
             lflow_ref_node_destroy(lrn);
 
@@ -1322,7 +1308,7 @@ lflow_ref_sync_lflows__(struct lflow_ref  *lflow_ref,
         }
     }
 
-    return true;
+    return handled;
 }
 
 /* Used for the datapath reference counting for a given 'struct ovn_lflow'.
@@ -1424,4 +1410,18 @@ lflow_ref_node_destroy(struct lflow_ref_node *lrn)
         bitmap_free(lrn->dp_bitmap);
     }
     free(lrn);
+}
+
+void
+lflow_table_clear_dp_groups(const struct lflow_table *lflow_table)
+{
+    /* This function should only be called in the case where the
+     * reference counts of dp_groups do not matter. For instance,
+     * if all dp_groups have been cleared/destroyed or are about
+     * to be cleared/destroyed
+     */
+    struct ovn_lflow *lflow;
+    HMAP_FOR_EACH (lflow, hmap_node, &lflow_table->entries) {
+        lflow->dpg = NULL;
+    }
 }

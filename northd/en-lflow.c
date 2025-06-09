@@ -144,13 +144,12 @@ lflow_northd_handler(struct engine_node *node,
     if (!lflow_handle_northd_port_changes(eng_ctx->ovnsb_idl_txn,
                                           &northd_data->trk_data.trk_lsps,
                                           &lflow_input,
-                                          lflow_data->lflow_table)) {
+                                          lflow_data)) {
         return EN_UNHANDLED;
     }
 
-    if (!lflow_handle_northd_lb_changes(
-            eng_ctx->ovnsb_idl_txn, &northd_data->trk_data.trk_lbs,
-            &lflow_input, lflow_data->lflow_table)) {
+    if (!lflow_handle_northd_lb_changes(&northd_data->trk_data.trk_lbs,
+            &lflow_input, lflow_data)) {
         return EN_UNHANDLED;
     }
 
@@ -183,15 +182,13 @@ lflow_lr_stateful_handler(struct engine_node *node, void *data)
         return EN_UNHANDLED;
     }
 
-    const struct engine_context *eng_ctx = engine_get_context();
     struct lflow_data *lflow_data = data;
     struct lflow_input lflow_input;
 
     lflow_get_input_data(node, &lflow_input);
-    if (!lflow_handle_lr_stateful_changes(eng_ctx->ovnsb_idl_txn,
-                                          &lr_sful_data->trk_data,
+    if (!lflow_handle_lr_stateful_changes(&lr_sful_data->trk_data,
                                           &lflow_input,
-                                          lflow_data->lflow_table)) {
+                                          lflow_data)) {
         return EN_UNHANDLED;
     }
 
@@ -208,15 +205,13 @@ lflow_ls_stateful_handler(struct engine_node *node, void *data)
         return EN_UNHANDLED;
     }
 
-    const struct engine_context *eng_ctx = engine_get_context();
     struct lflow_data *lflow_data = data;
     struct lflow_input lflow_input;
 
     lflow_get_input_data(node, &lflow_input);
-    if (!lflow_handle_ls_stateful_changes(eng_ctx->ovnsb_idl_txn,
-                                          &ls_sful_data->trk_data,
+    if (!lflow_handle_ls_stateful_changes(&ls_sful_data->trk_data,
                                           &lflow_input,
-                                          lflow_data->lflow_table)) {
+                                          lflow_data)) {
         return EN_UNHANDLED;
     }
 
@@ -229,37 +224,16 @@ lflow_multicast_igmp_handler(struct engine_node *node, void *data)
     struct multicast_igmp_data *mcast_igmp_data =
         engine_get_input_data("multicast_igmp", node);
 
-    const struct engine_context *eng_ctx = engine_get_context();
     struct lflow_data *lflow_data = data;
     struct lflow_input lflow_input;
     lflow_get_input_data(node, &lflow_input);
 
-    if (!lflow_ref_resync_flows(mcast_igmp_data->lflow_ref,
-                                lflow_data->lflow_table,
-                                eng_ctx->ovnsb_idl_txn,
-                                lflow_input.ls_datapaths,
-                                lflow_input.lr_datapaths,
-                                lflow_input.ovn_internal_version_changed,
-                                lflow_input.sbrec_logical_flow_table,
-                                lflow_input.sbrec_logical_dp_group_table)) {
-        return EN_UNHANDLED;
-    }
-
+    lflow_ref_unlink_lflows(mcast_igmp_data->lflow_ref);
     build_igmp_lflows(&mcast_igmp_data->igmp_groups,
                       &lflow_input.ls_datapaths->datapaths,
                       lflow_data->lflow_table,
                       mcast_igmp_data->lflow_ref);
-
-    if (!lflow_ref_sync_lflows(mcast_igmp_data->lflow_ref,
-                               lflow_data->lflow_table,
-                               eng_ctx->ovnsb_idl_txn,
-                               lflow_input.ls_datapaths,
-                               lflow_input.lr_datapaths,
-                               lflow_input.ovn_internal_version_changed,
-                               lflow_input.sbrec_logical_flow_table,
-                               lflow_input.sbrec_logical_dp_group_table)) {
-        return EN_UNHANDLED;
-    }
+    vector_push(&lflow_data->lflow_refs, &mcast_igmp_data->lflow_ref);
 
     return EN_HANDLED_UPDATED;
 }
@@ -276,7 +250,6 @@ lflow_group_ecmp_route_change_handler(struct engine_node *node,
         return EN_UNHANDLED;
     }
 
-    const struct engine_context *eng_ctx = engine_get_context();
     struct lflow_data *lflow_data = data;
 
     struct lflow_input lflow_input;
@@ -291,17 +264,7 @@ lflow_group_ecmp_route_change_handler(struct engine_node *node,
                     &group_ecmp_route_data->trk_data.deleted_datapath_routes) {
         route_node = hmapx_node->data;
         lflow_ref_unlink_lflows(route_node->lflow_ref);
-
-        bool handled = lflow_ref_sync_lflows(
-            route_node->lflow_ref, lflow_data->lflow_table,
-            eng_ctx->ovnsb_idl_txn, lflow_input.ls_datapaths,
-            lflow_input.lr_datapaths,
-            lflow_input.ovn_internal_version_changed,
-            lflow_input.sbrec_logical_flow_table,
-            lflow_input.sbrec_logical_dp_group_table);
-        if (!handled) {
-            return EN_UNHANDLED;
-        }
+        vector_push(&lflow_data->lflow_refs, &route_node->lflow_ref);
     }
 
     /* Now we handle created or updated route nodes. */
@@ -313,17 +276,7 @@ lflow_group_ecmp_route_change_handler(struct engine_node *node,
         build_route_data_flows_for_lrouter(
             route_node->od, lflow_data->lflow_table,
             route_node, lflow_input.bfd_ports);
-
-        bool handled = lflow_ref_sync_lflows(
-            route_node->lflow_ref, lflow_data->lflow_table,
-            eng_ctx->ovnsb_idl_txn, lflow_input.ls_datapaths,
-            lflow_input.lr_datapaths,
-            lflow_input.ovn_internal_version_changed,
-            lflow_input.sbrec_logical_flow_table,
-            lflow_input.sbrec_logical_dp_group_table);
-        if (!handled) {
-            return EN_UNHANDLED;
-        }
+        vector_push(&lflow_data->lflow_refs, &route_node->lflow_ref);
     }
 
     return EN_HANDLED_UPDATED;
@@ -335,6 +288,7 @@ void *en_lflow_init(struct engine_node *node OVS_UNUSED,
     struct lflow_data *data = xmalloc(sizeof *data);
     data->lflow_table = lflow_table_alloc();
     lflow_table_init(data->lflow_table);
+    data->lflow_refs = VECTOR_EMPTY_INITIALIZER(struct lflow_ref *);
     return data;
 }
 
@@ -348,6 +302,7 @@ void en_lflow_clear_tracked_data(void *data_)
 {
     struct lflow_data *data = data_;
     data->handled_incrementally = true;
+    vector_clear(&data->lflow_refs);
 }
 
 static bool
@@ -417,10 +372,15 @@ sb_lflows_sync_for_datapaths(
 
 static void
 lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
-                     const struct sbrec_logical_flow_table *sb_lflow_table)
+                     const struct sbrec_logical_flow_table *sb_lflow_table,
+                     const struct lflow_data *lflow_data)
 {
     hmap_init(&lflow_sync->sb_lflows.valid);
     hmap_init(&lflow_sync->sb_lflows.to_delete);
+
+    if (lflow_data) {
+        lflow_table_clear_dp_groups(lflow_data->lflow_table);
+    }
 
     if (!sb_lflow_table) {
         return;
@@ -479,7 +439,7 @@ en_lflow_sync_run(struct engine_node *node, void *data)
 
     struct lflow_sync_data *lflow_sync = data;
     lflow_sync_data_destroy(lflow_sync);
-    lflow_sync_data_init(lflow_sync, sb_lflow_table);
+    lflow_sync_data_init(lflow_sync, sb_lflow_table, lflow_data);
 
     stopwatch_start(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
 
@@ -507,7 +467,7 @@ en_lflow_sync_init(struct engine_node *node OVS_UNUSED,
                         struct engine_arg *arg OVS_UNUSED)
 {
     struct lflow_sync_data *lflow_sync = xzalloc(sizeof *lflow_sync);
-    lflow_sync_data_init(lflow_sync, NULL);
+    lflow_sync_data_init(lflow_sync, NULL, NULL);
     return lflow_sync;
 }
 
@@ -521,15 +481,48 @@ en_lflow_sync_cleanup(void *data)
 enum engine_input_handler_result
 lflow_sync_lflow_handler(struct engine_node *node, void *data OVS_UNUSED)
 {
-    const struct lflow_data *lflow_data = engine_get_input_data("lflow", node);
+    const struct sbrec_logical_flow_table *sb_lflow_table =
+        EN_OVSDB_GET(engine_get_input("SB_logical_flow", node));
+    /* XXX The lflow table is currently not treated as const because it
+     * contains mutable logical datapath groups. A future commit will
+     * separate the dp groups from the lflow_table so that this can be
+     * treated as const.
+     */
+    struct lflow_data *lflow_data =
+        engine_get_input_data("lflow", node);
+    const struct northd_data *northd =
+        engine_get_input_data("northd", node);
+    struct ed_type_global_config *global_config =
+        engine_get_input_data("global_config", node);
+    const struct sbrec_logical_dp_group_table *sb_dp_group_table =
+        EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
+    const struct engine_context *eng_ctx = engine_get_context();
 
     /* The en-lflow node's handlers sync flows based on lflow_refs. If they
      * were all able to handle the changes incrementally, then there's no need
      * for en-lflow-sync to perform a sync of the entire lflow table.
      */
-    if (lflow_data->handled_incrementally) {
-        return EN_HANDLED_UPDATED;
-    } else {
+    if (!lflow_data->handled_incrementally) {
         return EN_UNHANDLED;
     }
+
+    struct lflow_ref *lflow_ref;
+    bool handled = true;
+    VECTOR_FOR_EACH (&lflow_data->lflow_refs, lflow_ref) {
+        /* We need to be sure to attempt to sync all lflow_refs, even if
+         * one fails. The reason is that if there are any unlinked
+         * lflow_ref_nodes whose lflows are no longer referenced by
+         * any other lflow_ref_nodes, then those lflows need to be
+         * removed from the lflow table. Otherwise, when we fall back
+         * to recompute, we can attempt to sync non-existent lflows with
+         * the southbound database
+         */
+        handled &= lflow_ref_sync_lflows(
+            lflow_ref, lflow_data->lflow_table, eng_ctx->ovnsb_idl_txn,
+            &northd->ls_datapaths, &northd->lr_datapaths,
+            global_config->ovn_internal_version_changed, sb_lflow_table,
+            sb_dp_group_table);
+    }
+
+    return handled ? EN_HANDLED_UPDATED : EN_UNHANDLED;
 }
