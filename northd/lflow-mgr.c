@@ -77,7 +77,7 @@ static void ovn_dp_group_release(struct hmap *dp_groups,
                                  struct ovn_dp_group *);
 static void ovn_dp_group_destroy(struct ovn_dp_group *dpg);
 static void ovn_dp_group_add_with_reference(struct ovn_lflow *,
-                                            const struct ovn_datapath *od,
+                                            size_t dp_index,
                                             const unsigned long *dp_bitmap,
                                             size_t bitmap_len);
 
@@ -637,8 +637,8 @@ lflow_ref_sync_lflows(struct lflow_ref *lflow_ref,
  */
 void
 lflow_table_add_lflow(struct lflow_table *lflow_table,
-                      const struct ovn_datapath *od,
-                      const unsigned long *dp_bitmap, size_t dp_bitmap_len,
+                      size_t dp_index,
+                      const unsigned long *dp_bitmap, size_t num_datapaths,
                       const struct ovn_stage *stage, uint16_t priority,
                       const char *match, const char *actions,
                       const char *io_port, const char *ctrl_meter,
@@ -650,9 +650,6 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
     struct ovs_mutex *hash_lock;
     uint32_t hash;
 
-    ovs_assert(!od ||
-               ovn_stage_to_datapath_type(stage) == ovn_datapath_get_type(od));
-
     hash = ovn_logical_flow_hash(ovn_stage_get_table(stage),
                                  ovn_stage_get_pipeline(stage),
                                  priority, match,
@@ -660,8 +657,7 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
 
     hash_lock = lflow_hash_lock(&lflow_table->entries, hash);
     struct ovn_lflow *lflow =
-        do_ovn_lflow_add(lflow_table,
-                         od ? ods_size(od->datapaths) : dp_bitmap_len,
+        do_ovn_lflow_add(lflow_table, num_datapaths,
                          hash, stage, priority, match, actions,
                          io_port, ctrl_meter, stage_hint, where, flow_desc);
 
@@ -672,7 +668,7 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
             lrn = xzalloc(sizeof *lrn);
             lrn->lflow = lflow;
             lrn->lflow_ref = lflow_ref;
-            lrn->dp_bitmap_len = od ? ods_size(od->datapaths) : dp_bitmap_len;
+            lrn->dp_bitmap_len = num_datapaths;
             lrn->dp_bitmap = bitmap_allocate(lrn->dp_bitmap_len);
             ovs_list_insert(&lflow->referenced_by, &lrn->ref_list_node);
             hmap_insert(&lflow_ref->lflow_ref_nodes, &lrn->ref_node, hash);
@@ -681,25 +677,25 @@ lflow_table_add_lflow(struct lflow_table *lflow_table,
         /* Add refcounts for any datapaths already being used by this
          * lflow.
          */
-        if (od) {
-            bitmap_set1(lrn->dp_bitmap, od->index);
-            if (bitmap_is_set(lflow->dpg_bitmap, od->index)) {
-                dp_refcnt_use(&lflow->dp_refcnts_map, od->index);
-            }
-        } else {
+        if (dp_bitmap) {
             size_t index;
-            BITMAP_FOR_EACH_1 (index, dp_bitmap_len, dp_bitmap) {
+            BITMAP_FOR_EACH_1 (index, num_datapaths, dp_bitmap) {
                 bitmap_set1(lrn->dp_bitmap, index);
                 /* Allocate a reference counter only if already used. */
                 if (bitmap_is_set(lflow->dpg_bitmap, index)) {
                     dp_refcnt_use(&lflow->dp_refcnts_map, index);
                 }
             }
+        } else {
+            bitmap_set1(lrn->dp_bitmap, dp_index);
+            if (bitmap_is_set(lflow->dpg_bitmap, dp_index)) {
+                dp_refcnt_use(&lflow->dp_refcnts_map, dp_index);
+            }
         }
         lrn->linked = true;
     }
 
-    ovn_dp_group_add_with_reference(lflow, od, dp_bitmap, dp_bitmap_len);
+    ovn_dp_group_add_with_reference(lflow, dp_index, dp_bitmap, num_datapaths);
 
     lflow_hash_unlock(hash_lock);
 }
@@ -711,7 +707,8 @@ lflow_table_add_lflow_default_drop(struct lflow_table *lflow_table,
                                    const char *where,
                                    struct lflow_ref *lflow_ref)
 {
-    lflow_table_add_lflow(lflow_table, od, NULL, 0, stage, 0, "1",
+    lflow_table_add_lflow(lflow_table, od->index, NULL,
+                          ods_size(od->datapaths), stage, 0, "1",
                           debug_drop_action(), NULL, NULL, NULL,
                           where, NULL, lflow_ref);
 }
@@ -1214,21 +1211,20 @@ ovn_sb_insert_or_update_logical_dp_group(
     return dp_group;
 }
 
-/* Adds an OVN datapath to a datapath group of existing logical flow.
+/* Adds a datapath index to a datapath group of existing logical flow.
  * Version to use when hash bucket locking is NOT required or the corresponding
  * hash lock is already taken. */
 static void
 ovn_dp_group_add_with_reference(struct ovn_lflow *lflow_ref,
-                                const struct ovn_datapath *od,
+                                size_t dp_index,
                                 const unsigned long *dp_bitmap,
                                 size_t bitmap_len)
     OVS_REQUIRES(fake_hash_mutex)
 {
-    if (od) {
-        bitmap_set1(lflow_ref->dpg_bitmap, od->index);
-    }
     if (dp_bitmap) {
         bitmap_or(lflow_ref->dpg_bitmap, dp_bitmap, bitmap_len);
+    } else {
+        bitmap_set1(lflow_ref->dpg_bitmap, dp_index);
     }
 }
 
