@@ -45,4 +45,9 @@ enum engine_node_state en_datapath_synced_logical_switch_run(
     struct engine_node *, void *data);
 void en_datapath_synced_logical_switch_cleanup(void *data);
 
+struct uuid;
+const struct ovn_synced_logical_switch *
+ovn_synced_logical_switch_find(const struct ovn_synced_logical_switch_map *map,
+                               const struct uuid *nb_uuid);
+
 #endif /* EN_DATAPATH_LOGICAL_SWITCH_H */

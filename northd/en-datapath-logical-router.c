@@ -172,3 +172,18 @@ void en_datapath_synced_logical_router_cleanup(void *data)
     struct ovn_synced_logical_router_map *router_map = data;
     synced_logical_router_map_destroy(router_map);
 }
+
+const struct ovn_synced_logical_router *
+ovn_synced_logical_router_find(const struct ovn_synced_logical_router_map *map,
+                               const struct uuid *nb_uuid)
+{
+    uint32_t hash = uuid_hash(nb_uuid);
+    const struct ovn_synced_logical_router *router;
+    HMAP_FOR_EACH_WITH_HASH (router, hmap_node, hash, &map->synced_routers) {
+        if (uuid_equals(&router->nb->header_.uuid, nb_uuid)) {
+            return router;
+        }
+    }
+
+    return NULL;
+}

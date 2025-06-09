@@ -29,6 +29,8 @@
 #include "en-sampling-app.h"
 #include "en-group-ecmp-route.h"
 #include "lflow-mgr.h"
+#include "en-datapath-logical-switch.h"
+#include "en-datapath-logical-router.h"
 
 #include "lib/inc-proc-eng.h"
 #include "northd.h"
@@ -348,6 +350,71 @@ void en_lflow_clear_tracked_data(void *data_)
     data->handled_incrementally = true;
 }
 
+static bool
+datapath_is_valid(const struct sbrec_datapath_binding *dp,
+                  const struct ovn_synced_logical_switch_map *synced_lses,
+                  const struct ovn_synced_logical_router_map *synced_lrs)
+{
+    enum ovn_datapath_type dp_type = ovn_datapath_type_from_string(dp->type);
+    if (dp_type == DP_MAX) {
+        return false;
+    }
+    struct uuid nb_dp_key;
+    if (!smap_get_uuid(&dp->external_ids, "nb_uuid", &nb_dp_key)) {
+        return false;
+    }
+    if (dp_type == DP_SWITCH) {
+        if (ovn_synced_logical_switch_find(synced_lses, &nb_dp_key)) {
+            return true;
+        } else {
+            return false;
+        }
+    } else if (dp_type == DP_ROUTER) {
+        if (ovn_synced_logical_router_find(synced_lrs, &nb_dp_key)) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    return false;
+}
+
+static void
+sb_lflows_sync_for_datapaths(
+    const struct ovn_synced_logical_switch_map *switches,
+    const struct ovn_synced_logical_router_map *routers,
+    struct sb_lflows *sb_lflows)
+{
+    struct sb_lflow *sb_lflow;
+    HMAP_FOR_EACH_SAFE (sb_lflow, hmap_node, &sb_lflows->valid) {
+        struct sbrec_datapath_binding *dp = sb_lflow->flow->logical_datapath;
+        if (dp) {
+            if (!datapath_is_valid(dp, switches, routers)) {
+                hmap_remove(&sb_lflows->valid, &sb_lflow->hmap_node);
+                hmap_insert(&sb_lflows->to_delete, &sb_lflow->hmap_node,
+                            hmap_node_hash(&sb_lflow->hmap_node));
+            }
+        } else if (sb_lflow->flow->logical_dp_group) {
+            const struct sbrec_logical_dp_group *dp_group;
+            dp_group = sb_lflow->flow->logical_dp_group;
+            for (size_t i = 0; i < dp_group->n_datapaths; i++) {
+                dp = dp_group->datapaths[i];
+                if (datapath_is_valid(dp, switches, routers)) {
+                    break;
+                }
+                dp = NULL;
+            }
+
+        }
+        if (!dp) {
+            hmap_remove(&sb_lflows->valid, &sb_lflow->hmap_node);
+            hmap_insert(&sb_lflows->to_delete, &sb_lflow->hmap_node,
+                        hmap_node_hash(&sb_lflow->hmap_node));
+        }
+    }
+}
+
 static void
 lflow_sync_data_init(struct lflow_sync_data *lflow_sync,
                      const struct sbrec_logical_flow_table *sb_lflow_table)
@@ -391,6 +458,10 @@ en_lflow_sync_run(struct engine_node *node, void *data)
 {
     const struct sbrec_logical_flow_table *sb_lflow_table =
         EN_OVSDB_GET(engine_get_input("SB_logical_flow", node));
+    const struct ovn_synced_logical_switch_map *synced_lses =
+        engine_get_input_data("datapath_synced_logical_switch", node);
+    const struct ovn_synced_logical_router_map *synced_lrs =
+        engine_get_input_data("datapath_synced_logical_router", node);
     /* XXX The lflow table is currently not treated as const because it
      * contains mutable logical datapath groups. A future commit will
      * separate the dp groups from the lflow_table so that this can be
@@ -412,6 +483,8 @@ en_lflow_sync_run(struct engine_node *node, void *data)
 
     stopwatch_start(LFLOWS_TO_SB_STOPWATCH_NAME, time_msec());
 
+    sb_lflows_sync_for_datapaths(synced_lses, synced_lrs,
+                                 &lflow_sync->sb_lflows);
     lflow_table_sync_to_sb(lflow_data->lflow_table, eng_ctx->ovnsb_idl_txn,
                            &northd->ls_datapaths,
                            &northd->lr_datapaths,

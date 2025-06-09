@@ -170,3 +170,18 @@ void en_datapath_synced_logical_switch_cleanup(void *data)
     struct ovn_synced_logical_switch_map *switch_map = data;
     synced_logical_switch_map_destroy(switch_map);
 }
+
+const struct ovn_synced_logical_switch *
+ovn_synced_logical_switch_find(const struct ovn_synced_logical_switch_map *map,
+                               const struct uuid *nb_uuid)
+{
+    uint32_t hash = uuid_hash(nb_uuid);
+    const struct ovn_synced_logical_switch *ls;
+    HMAP_FOR_EACH_WITH_HASH (ls, hmap_node, hash, &map->synced_switches) {
+        if (uuid_equals(&ls->nb->header_.uuid, nb_uuid)) {
+            return ls;
+        }
+    }
+
+    return NULL;
+}

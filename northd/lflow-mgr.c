@@ -249,6 +249,26 @@ lflow_table_set_size(struct lflow_table *lflow_table, size_t size)
     lflow_table->entries.n = size;
 }
 
+static enum ovn_datapath_type
+datapath_type_from_sb_lflow(const struct sbrec_logical_flow *sb_lflow)
+{
+    const char *dp_type_str = NULL;
+    if (sb_lflow->logical_datapath) {
+        dp_type_str = sb_lflow->logical_datapath->type;
+    } else if (sb_lflow->logical_dp_group) {
+        /* All datapaths in a dp_group are of the same type, so just use the
+         * first datapath in the group to determine the type.
+         */
+        dp_type_str = sb_lflow->logical_dp_group->datapaths[0]->type;
+    }
+
+    if (!dp_type_str) {
+        return DP_MAX;
+    }
+
+    return ovn_datapath_type_from_string(dp_type_str);
+}
+
 void
 lflow_table_sync_to_sb(struct lflow_table *lflow_table,
                        struct ovsdb_idl_txn *ovnsb_txn,
@@ -269,41 +289,17 @@ lflow_table_sync_to_sb(struct lflow_table *lflow_table,
     struct sb_lflow *sb_lflow;
     HMAP_FOR_EACH (sb_lflow, hmap_node, &sb_lflows->valid) {
         const struct sbrec_logical_flow *sbflow = sb_lflow->flow;
-        struct sbrec_logical_dp_group *dp_group = sbflow->logical_dp_group;
-        struct ovn_datapath *logical_datapath_od = NULL;
-        size_t i;
-
-        /* Find one valid datapath to get the datapath type. */
-        struct sbrec_datapath_binding *dp = sbflow->logical_datapath;
-        if (dp) {
-            logical_datapath_od = ovn_datapath_from_sbrec(
-                &ls_datapaths->datapaths, &lr_datapaths->datapaths, dp);
-            if (logical_datapath_od
-                && ovn_datapath_is_stale(logical_datapath_od)) {
-                logical_datapath_od = NULL;
-            }
-        }
-        for (i = 0; dp_group && i < dp_group->n_datapaths; i++) {
-            logical_datapath_od = ovn_datapath_from_sbrec(
-                &ls_datapaths->datapaths, &lr_datapaths->datapaths,
-                dp_group->datapaths[i]);
-            if (logical_datapath_od
-                && !ovn_datapath_is_stale(logical_datapath_od)) {
-                break;
-            }
-            logical_datapath_od = NULL;
-        }
-
-        if (!logical_datapath_od) {
-            /* This lflow has no valid logical datapaths. */
-            continue;
-        }
 
         enum ovn_pipeline pipeline
             = !strcmp(sbflow->pipeline, "ingress") ? P_IN : P_OUT;
 
         enum ovn_datapath_type dp_type
-            = ovn_datapath_get_type(logical_datapath_od);
+            = datapath_type_from_sb_lflow(sbflow);
+
+        /* Since we should have weeded out sb_lflows with invalid
+         * datapaths, we should only get valid datapath types here.
+         */
+        ovs_assert(dp_type < DP_MAX);
 
         lflow = ovn_lflow_find(
             lflows,

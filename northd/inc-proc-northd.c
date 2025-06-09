@@ -447,6 +447,10 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lflow, &en_sb_acl_id, NULL);
 
     engine_add_input(&en_lflow_sync, &en_sb_logical_flow, NULL);
+    engine_add_input(&en_lflow_sync, &en_datapath_synced_logical_router,
+                     engine_noop_handler);
+    engine_add_input(&en_lflow_sync, &en_datapath_synced_logical_switch,
+                     engine_noop_handler);
     engine_add_input(&en_lflow_sync, &en_global_config,
                      node_global_config_handler);
     engine_add_input(&en_lflow_sync, &en_lflow, lflow_sync_lflow_handler);

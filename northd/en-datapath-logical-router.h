@@ -46,4 +46,9 @@ enum engine_node_state en_datapath_synced_logical_router_run(
 
 void en_datapath_synced_logical_router_cleanup(void *data);
 
+struct uuid;
+const struct ovn_synced_logical_router *
+ovn_synced_logical_router_find(const struct ovn_synced_logical_router_map *map,
+                               const struct uuid *nb_uuid);
+
 #endif /* EN_DATAPATH_LOGICAL_ROUTER_H */
