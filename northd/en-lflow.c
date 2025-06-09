@@ -31,6 +31,7 @@
 #include "lflow-mgr.h"
 #include "en-datapath-logical-switch.h"
 #include "en-datapath-logical-router.h"
+#include "datapath_sync.h"
 
 #include "lib/inc-proc-eng.h"
 #include "northd.h"
@@ -314,25 +315,20 @@ datapath_is_valid(const struct sbrec_datapath_binding *dp,
     if (dp_type == DP_MAX) {
         return false;
     }
-    struct uuid nb_dp_key;
-    if (!smap_get_uuid(&dp->external_ids, "nb_uuid", &nb_dp_key)) {
+    const struct ovn_datapath_binding_hashvec *hashvec;
+    switch (dp_type) {
+    case DP_SWITCH:
+        hashvec = &synced_lses->datapaths;
+        break;
+    case DP_ROUTER:
+        hashvec = &synced_lrs->datapaths;
+        break;
+    case DP_MAX:
+    default:
         return false;
     }
-    if (dp_type == DP_SWITCH) {
-        if (ovn_synced_logical_switch_find(synced_lses, &nb_dp_key)) {
-            return true;
-        } else {
-            return false;
-        }
-    } else if (dp_type == DP_ROUTER) {
-        if (ovn_synced_logical_router_find(synced_lrs, &nb_dp_key)) {
-            return true;
-        } else {
-            return false;
-        }
-    }
 
-    return false;
+    return ovn_datapath_binding_find(hashvec, dp) != NULL;
 }
 
 static void

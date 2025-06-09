@@ -146,9 +146,8 @@ en_northd_run(struct engine_node *node, void *data)
     struct northd_input input_data;
 
     northd_destroy(data);
-    northd_init(data);
-
     northd_get_input_data(node, &input_data);
+    northd_init(data, &input_data);
 
     COVERAGE_INC(northd_run);
     stopwatch_start(OVNNB_DB_RUN_STOPWATCH_NAME, time_msec());
@@ -433,7 +432,7 @@ void
 {
     struct northd_data *data = xzalloc(sizeof *data);
 
-    northd_init(data);
+    northd_init(data, NULL);
 
     return data;
 }

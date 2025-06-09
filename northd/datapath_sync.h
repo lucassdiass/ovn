@@ -17,7 +17,7 @@
 #define DATAPATH_SYNC_H 1
 
 #include "openvswitch/hmap.h"
-#include "openvswitch/list.h"
+#include "vec.h"
 #include "smap.h"
 
 /* Datapath syncing API. This file consists of utility functions
@@ -30,7 +30,8 @@
  * 2. The en_datapath_sync node takes all of the maps in as input and
  * syncs them with southbound datapath bindings. This includes allocating
  * tunnel keys across all datapath types. The output of this node is
- * ovn_synced_datapaths, which contains a list of all synced datapaths.
+ * ovn_synced_datapaths, which contains a sorted vector of all synced
+ * datapaths.
  * 3. A northbound type-aware node then takes the ovn_synced_datapaths,
  * and decodes the generic synced datapaths back into a type-specific
  * version (e.g. ovn_synced_logical_router). Later nodes can then consume
@@ -66,13 +67,12 @@ struct ovn_unsynced_datapath_map {
 };
 
 struct ovn_synced_datapath {
-    struct ovs_list list_node;
     const struct ovsdb_idl_row *nb_row;
     const struct sbrec_datapath_binding *sb_dp;
 };
 
 struct ovn_synced_datapaths {
-    struct ovs_list synced_dps;
+    struct vector synced_dps;
 };
 
 struct ovn_unsynced_datapath *ovn_unsynced_datapath_alloc(
@@ -84,4 +84,29 @@ void ovn_unsynced_datapath_map_init(struct ovn_unsynced_datapath_map *map,
                                     enum ovn_datapath_type dp_type);
 void ovn_unsynced_datapath_map_destroy(struct ovn_unsynced_datapath_map *map);
 
+struct ovn_datapath_binding {
+    struct hmap_node hmap_node;
+    const struct sbrec_datapath_binding *sb;
+    size_t index;
+};
+
+struct ovn_datapath_binding_hashvec {
+    struct hmap bindings_map;
+    struct vector bindings_vec;
+};
+
+void ovn_datapath_binding_hashvec_init(
+    struct ovn_datapath_binding_hashvec *hashvec);
+
+void ovn_datapath_binding_hashvec_destroy(
+    struct ovn_datapath_binding_hashvec *hashvec);
+
+const struct ovn_datapath_binding *
+ovn_datapath_binding_hashvec_add(
+    struct ovn_datapath_binding_hashvec *hashvec,
+    const struct sbrec_datapath_binding *sb);
+
+const struct ovn_datapath_binding *
+ovn_datapath_binding_find(const struct ovn_datapath_binding_hashvec *hashvec,
+                          const struct sbrec_datapath_binding *sb);
 #endif /* DATAPATH_SYNC_H */

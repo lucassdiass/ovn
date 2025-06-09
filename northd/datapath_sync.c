@@ -15,7 +15,9 @@
 
 #include <config.h>
 
+#include "ovn-sb-idl.h"
 #include "datapath_sync.h"
+#include "uuid.h"
 
 static const char *ovn_datapath_strings [] = {
     [DP_SWITCH] = "logical-switch",
@@ -83,4 +85,54 @@ ovn_unsynced_datapath_map_destroy(struct ovn_unsynced_datapath_map *map)
         free(dp);
     }
     hmap_destroy(&map->dps);
+}
+
+void
+ovn_datapath_binding_hashvec_init(struct ovn_datapath_binding_hashvec *hashvec)
+{
+    hmap_init(&hashvec->bindings_map);
+    hashvec->bindings_vec =
+        VECTOR_EMPTY_INITIALIZER(struct ovn_datapath_binding *);
+}
+
+void
+ovn_datapath_binding_hashvec_destroy(
+    struct ovn_datapath_binding_hashvec *hashvec)
+{
+    struct ovn_datapath_binding *binding;
+    HMAP_FOR_EACH_POP (binding, hmap_node, &hashvec->bindings_map) {
+        free(binding);
+    }
+    hmap_destroy(&hashvec->bindings_map);
+    vector_destroy(&hashvec->bindings_vec);
+}
+
+const struct ovn_datapath_binding *
+ovn_datapath_binding_hashvec_add(
+    struct ovn_datapath_binding_hashvec *hashvec,
+    const struct sbrec_datapath_binding *sb)
+{
+    struct ovn_datapath_binding *binding = xmalloc(sizeof *binding);
+    binding->sb = sb;
+    binding->index = vector_len(&hashvec->bindings_vec);
+    hmap_insert(&hashvec->bindings_map, &binding->hmap_node,
+                uuid_hash(&sb->header_.uuid));
+    vector_push(&hashvec->bindings_vec, &binding);
+    return binding;
+}
+
+const struct ovn_datapath_binding *
+ovn_datapath_binding_find(const struct ovn_datapath_binding_hashvec *hashvec,
+                          const struct sbrec_datapath_binding *sb)
+{
+    const struct ovn_datapath_binding *binding;
+    size_t hash = uuid_hash(&sb->header_.uuid);
+    HMAP_FOR_EACH_WITH_HASH (binding, hmap_node, hash,
+                             &hashvec->bindings_map) {
+        if (uuid_equals(&binding->sb->header_.uuid, &sb->header_.uuid)) {
+            return binding;
+        }
+    }
+
+    return NULL;
 }

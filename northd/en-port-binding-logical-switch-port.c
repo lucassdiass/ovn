@@ -117,7 +117,7 @@ en_port_binding_logical_switch_port_run(struct engine_node *node, void *data)
                                                   nbsp->name,
                                                   PB_SWITCH_PORT,
                                                   cookie,
-                                                  paired_ls->sb);
+                                                  paired_ls->binding->sb);
             smap_clone(&upb->external_ids, &nbsp->external_ids);
             const char *name = smap_get(&nbsp->external_ids,
                                         "neutron:port_name");

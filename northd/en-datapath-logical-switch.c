@@ -115,6 +115,7 @@ synced_logical_switch_map_init(
     struct ovn_synced_logical_switch_map *switch_map)
 {
     hmap_init(&switch_map->synced_switches);
+    ovn_datapath_binding_hashvec_init(&switch_map->datapaths);
 }
 
 static void
@@ -126,6 +127,7 @@ synced_logical_switch_map_destroy(
         free(ls);
     }
     hmap_destroy(&switch_map->synced_switches);
+    ovn_datapath_binding_hashvec_destroy(&switch_map->datapaths);
 }
 
 void *
@@ -150,14 +152,15 @@ en_datapath_synced_logical_switch_run(struct engine_node *node , void *data)
     synced_logical_switch_map_init(switch_map);
 
     struct ovn_synced_datapath *sdp;
-    LIST_FOR_EACH (sdp, list_node, &dps->synced_dps) {
+    VECTOR_FOR_EACH (&dps->synced_dps, sdp) {
         if (sdp->nb_row->table->class_ != &nbrec_table_logical_switch) {
             continue;
         }
         struct ovn_synced_logical_switch *lsw = xmalloc(sizeof *lsw);
         lsw->nb = CONTAINER_OF(sdp->nb_row, struct nbrec_logical_switch,
                                header_);
-        lsw->sb = sdp->sb_dp;
+        lsw->binding = ovn_datapath_binding_hashvec_add(&switch_map->datapaths,
+                                                        sdp->sb_dp);
         hmap_insert(&switch_map->synced_switches, &lsw->hmap_node,
                     uuid_hash(&lsw->nb->header_.uuid));
     }
@@ -177,7 +180,8 @@ ovn_synced_logical_switch_find(const struct ovn_synced_logical_switch_map *map,
 {
     uint32_t hash = uuid_hash(nb_uuid);
     const struct ovn_synced_logical_switch *ls;
-    HMAP_FOR_EACH_WITH_HASH (ls, hmap_node, hash, &map->synced_switches) {
+    HMAP_FOR_EACH_WITH_HASH (ls, hmap_node, hash,
+                             &map->synced_switches) {
         if (uuid_equals(&ls->nb->header_.uuid, nb_uuid)) {
             return ls;
         }

@@ -197,8 +197,8 @@ en_port_binding_chassisredirect_port_run(struct engine_node *node, void *data)
             struct chassisredirect_port *crp =
                 chassisredirect_router_port_alloc(nbrp);
             upb = ovn_unpaired_port_binding_alloc(0, crp->name,
-                                                  PB_CHASSISREDIRECT_PORT,
-                                                  crp, rdgps->lr->sb);
+                                                  PB_CHASSISREDIRECT_PORT, crp,
+                                                  rdgps->lr->binding->sb);
             shash_add(&map->ports, crp->name, upb);
         }
     }
@@ -235,8 +235,8 @@ en_port_binding_chassisredirect_port_run(struct engine_node *node, void *data)
             struct chassisredirect_port *crp =
                 chassisredirect_switch_port_alloc(nbsp);
             upb = ovn_unpaired_port_binding_alloc(0, crp->name,
-                                                  PB_CHASSISREDIRECT_PORT,
-                                                  crp, localnets->ls->sb);
+                                                  PB_CHASSISREDIRECT_PORT, crp,
+                                                  localnets->ls->binding->sb);
             shash_add(&map->ports, crp->name, upb);
         }
     }

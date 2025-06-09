@@ -107,13 +107,13 @@ en_port_binding_mirror_run(struct engine_node *node, void *data)
                 if (!sset_find(&all_switch_ports, nb_mirror->sink)) {
                     continue;
                 }
-                struct mirror_port *mp = mirror_port_alloc(ls->sb,
+                struct mirror_port *mp = mirror_port_alloc(ls->binding->sb,
                                                            nb_mirror->sink,
                                                            nbsp);
                 struct ovn_unpaired_port_binding *upb;
                 upb = ovn_unpaired_port_binding_alloc(0, mp->name,
                                                       PB_MIRROR_PORT, mp,
-                                                      ls->sb);
+                                                      ls->binding->sb);
                 shash_add(&map->ports, mp->name, upb);
             }
         }

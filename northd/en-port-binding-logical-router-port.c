@@ -97,7 +97,7 @@ en_port_binding_logical_router_port_run(struct engine_node *node, void *data)
                                                   nbrp->name,
                                                   PB_ROUTER_PORT,
                                                   cookie,
-                                                  paired_lr->sb);
+                                                  paired_lr->binding->sb);
             smap_clone(&upb->external_ids, &nbrp->external_ids);
             if (!shash_add_once(&map->ports, nbrp->name, upb)) {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);

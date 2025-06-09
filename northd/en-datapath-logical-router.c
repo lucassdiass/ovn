@@ -117,6 +117,7 @@ synced_logical_router_map_init(
     struct ovn_synced_logical_router_map *router_map)
 {
     hmap_init(&router_map->synced_routers);
+    ovn_datapath_binding_hashvec_init(&router_map->datapaths);
 }
 
 static void
@@ -128,6 +129,7 @@ synced_logical_router_map_destroy(
         free(lr);
     }
     hmap_destroy(&router_map->synced_routers);
+    ovn_datapath_binding_hashvec_destroy(&router_map->datapaths);
 }
 
 void *
@@ -152,14 +154,15 @@ en_datapath_synced_logical_router_run(struct engine_node *node , void *data)
     synced_logical_router_map_init(router_map);
 
     struct ovn_synced_datapath *sdp;
-    LIST_FOR_EACH (sdp, list_node, &dps->synced_dps) {
+    VECTOR_FOR_EACH (&dps->synced_dps, sdp) {
         if (sdp->nb_row->table->class_ != &nbrec_table_logical_router) {
             continue;
         }
         struct ovn_synced_logical_router *lr = xmalloc(sizeof *lr);
         lr->nb = CONTAINER_OF(sdp->nb_row, struct nbrec_logical_router,
                               header_);
-        lr->sb = sdp->sb_dp;
+        lr->binding = ovn_datapath_binding_hashvec_add(&router_map->datapaths,
+                                                       sdp->sb_dp);
         hmap_insert(&router_map->synced_routers, &lr->hmap_node,
                     uuid_hash(&lr->nb->header_.uuid));
     }
@@ -179,7 +182,8 @@ ovn_synced_logical_router_find(const struct ovn_synced_logical_router_map *map,
 {
     uint32_t hash = uuid_hash(nb_uuid);
     const struct ovn_synced_logical_router *router;
-    HMAP_FOR_EACH_WITH_HASH (router, hmap_node, hash, &map->synced_routers) {
+    HMAP_FOR_EACH_WITH_HASH (router, hmap_node, hash,
+                             &map->synced_routers) {
         if (uuid_equals(&router->nb->header_.uuid, nb_uuid)) {
             return router;
         }

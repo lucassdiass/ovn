@@ -505,17 +505,26 @@ struct lrouter_group {
 static void init_mcast_info_for_datapath(struct ovn_datapath *od);
 
 static struct ovn_datapath *
-ovn_datapath_create(struct hmap *datapaths, const struct uuid *key,
+ovn_datapath_create(struct ovn_datapaths *datapaths, const struct uuid *key,
                     const struct nbrec_logical_switch *nbs,
                     const struct nbrec_logical_router *nbr,
-                    const struct sbrec_datapath_binding *sb)
+                    const struct sbrec_datapath_binding *sb,
+                    size_t index)
 {
     struct ovn_datapath *od = xzalloc(sizeof *od);
     od->key = *key;
     od->sb = sb;
     od->nbs = nbs;
     od->nbr = nbr;
-    hmap_insert(datapaths, &od->key_node, uuid_hash(&od->key));
+    hmap_insert(&datapaths->datapaths, &od->key_node, uuid_hash(&od->key));
+    /* Datapath indices correspond with the southbound datapath vector for
+     * the particular datapath type. This ensures that whether objects derive
+     * their own indices/bitmaps from the datapaths array or the sb_vec,
+     * the indices are consistent.
+     */
+    datapaths->array[index] = od;
+    od->index = index;
+    od->datapaths = datapaths;
     od->lr_group = NULL;
     hmap_init(&od->ports);
     sset_init(&od->router_ips);
@@ -829,25 +838,6 @@ parse_dynamic_routing_redistribute(
     return out;
 }
 
-static void
-ods_build_array_index(struct ovn_datapaths *datapaths)
-{
-    /* Assign unique sequential indexes to all datapaths.  These are not
-     * visible outside of the northd loop, so, unlike the tunnel keys, it
-     * doesn't matter if they are different on every iteration. */
-    size_t index = 0;
-
-    datapaths->array = xrealloc(datapaths->array,
-                            ods_size(datapaths) * sizeof *datapaths->array);
-
-    struct ovn_datapath *od;
-    HMAP_FOR_EACH (od, key_node, &datapaths->datapaths) {
-        od->index = index;
-        datapaths->array[index++] = od;
-        od->datapaths = datapaths;
-    }
-}
-
 /* Initializes 'ls_datapaths' to contain a "struct ovn_datapath" for every
  * logical switch, and initializes 'lr_datapaths' to contain a
  * "struct ovn_datapath" for every logical router.
@@ -861,9 +851,10 @@ build_datapaths(const struct ovn_synced_logical_switch_map *ls_map,
     struct ovn_synced_logical_switch *ls;
     HMAP_FOR_EACH (ls, hmap_node, &ls_map->synced_switches) {
         struct ovn_datapath *od =
-            ovn_datapath_create(&ls_datapaths->datapaths,
+            ovn_datapath_create(ls_datapaths,
                                 &ls->nb->header_.uuid,
-                                ls->nb, NULL, ls->sb);
+                                ls->nb, NULL, ls->binding->sb,
+                                ls->binding->index);
         init_ipam_info_for_datapath(od);
         if (smap_get_bool(&od->nbs->other_config,
                           "enable-stateless-acl-with-lb",
@@ -875,9 +866,10 @@ build_datapaths(const struct ovn_synced_logical_switch_map *ls_map,
     struct ovn_synced_logical_router *lr;
     HMAP_FOR_EACH (lr, hmap_node, &lr_map->synced_routers) {
         struct ovn_datapath *od =
-            ovn_datapath_create(&lr_datapaths->datapaths,
+            ovn_datapath_create(lr_datapaths,
                                 &lr->nb->header_.uuid,
-                                NULL, lr->nb, lr->sb);
+                                NULL, lr->nb, lr->binding->sb,
+                                lr->binding->index);
         if (smap_get(&od->nbr->options, "chassis")) {
             od->is_gw_router = true;
         }
@@ -887,9 +879,6 @@ build_datapaths(const struct ovn_synced_logical_switch_map *ls_map,
             parse_dynamic_routing_redistribute(&od->nbr->options, DRRM_NONE,
                                                od->nbr->name);
     }
-
-    ods_build_array_index(ls_datapaths);
-    ods_build_array_index(lr_datapaths);
 }
 
 static bool lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *);
@@ -2053,7 +2042,7 @@ join_logical_ports(
     struct shash_node *node;
     SHASH_FOR_EACH (node, &paired_lrps->paired_router_ports) {
         struct ovn_paired_logical_router_port *slrp = node->data;
-        od = ovn_datapath_from_sbrec_(lr_datapaths, slrp->router->sb);
+        od = ovn_datapath_from_sbrec_(lr_datapaths, slrp->router->binding->sb);
         if (!od) {
             /* This can happen if the router is not enabled */
             continue;
@@ -2072,8 +2061,7 @@ join_logical_ports(
 
     SHASH_FOR_EACH (node, &paired_lsps->paired_switch_ports) {
         struct ovn_paired_logical_switch_port *slsp = node->data;
-        od = ovn_datapath_from_sbrec_(ls_datapaths, slsp->sw->sb);
-
+        od = ovn_datapath_from_sbrec_(ls_datapaths, slsp->sw->binding->sb);
         ovs_assert(od);
 
         join_logical_ports_lsp(ls_ports, od, slsp->nb, slsp->sb,
@@ -18462,10 +18450,10 @@ build_static_mac_binding_table(
 }
 
 static void
-ovn_datapaths_init(struct ovn_datapaths *datapaths)
+ovn_datapaths_init(struct ovn_datapaths *datapaths, size_t n_datapaths)
 {
     hmap_init(&datapaths->datapaths);
-    datapaths->array = NULL;
+    datapaths->array = xcalloc(n_datapaths, sizeof *datapaths->array);
 }
 
 static void
@@ -18518,10 +18506,12 @@ destroy_datapaths_and_ports(struct ovn_datapaths *ls_datapaths,
 }
 
 void
-northd_init(struct northd_data *data)
+northd_init(struct northd_data *data, const struct northd_input *ni)
 {
-    ovn_datapaths_init(&data->ls_datapaths);
-    ovn_datapaths_init(&data->lr_datapaths);
+    ovn_datapaths_init(&data->ls_datapaths,
+        ni ? vector_len(&ni->synced_lses->datapaths.bindings_vec) : 0);
+    ovn_datapaths_init(&data->lr_datapaths,
+        ni ? vector_len(&ni->synced_lrs->datapaths.bindings_vec) : 0);
     hmap_init(&data->ls_ports);
     hmap_init(&data->lr_ports);
     hmap_init(&data->lb_datapaths_map);

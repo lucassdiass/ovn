@@ -834,7 +834,7 @@ bool northd_handle_lr_changes(const struct northd_input *,
                               struct northd_data *);
 void destroy_northd_data_tracked_changes(struct northd_data *);
 void northd_destroy(struct northd_data *data);
-void northd_init(struct northd_data *data);
+void northd_init(struct northd_data *data, const struct northd_input *);
 void northd_indices_create(struct northd_data *data,
                            struct ovsdb_idl *ovnsb_idl);
 

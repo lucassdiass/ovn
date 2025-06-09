@@ -33,7 +33,8 @@ en_datapath_sync_init(struct engine_node *node OVS_UNUSED,
 {
     struct ovn_synced_datapaths *synced_datapaths
         = xmalloc(sizeof *synced_datapaths);
-    ovs_list_init(&synced_datapaths->synced_dps);
+    synced_datapaths->synced_dps =
+        VECTOR_EMPTY_INITIALIZER(struct ovn_synced_datapath *);
 
     return synced_datapaths;
 }
@@ -97,10 +98,11 @@ static void
 reset_synced_datapaths(struct ovn_synced_datapaths *synced_datapaths)
 {
     struct ovn_synced_datapath *sdp;
-    LIST_FOR_EACH_POP (sdp, list_node, &synced_datapaths->synced_dps) {
+    VECTOR_FOR_EACH (&synced_datapaths->synced_dps, sdp) {
         free(sdp);
     }
-    ovs_list_init(&synced_datapaths->synced_dps);
+    /* vector_destroy both destroys and inits the vector */
+    vector_destroy(&synced_datapaths->synced_dps);
 }
 
 static void
@@ -186,9 +188,8 @@ assign_requested_tunnel_keys(struct vector *candidate_sdps,
         }
         sbrec_datapath_binding_set_tunnel_key(candidate->sdp->sb_dp,
                                               candidate->requested_tunnel_key);
-        ovs_list_push_back(&synced_datapaths->synced_dps,
-                           &candidate->sdp->list_node);
         candidate->tunnel_key_assigned = true;
+        vector_push(&synced_datapaths->synced_dps, &candidate->sdp);
     }
 }
 
@@ -207,9 +208,8 @@ assign_existing_tunnel_keys(struct vector *candidate_sdps,
          * reuse it.
          */
         if (ovn_add_tnlid(dp_tnlids, candidate->existing_tunnel_key)) {
-            ovs_list_push_back(&synced_datapaths->synced_dps,
-                               &candidate->sdp->list_node);
             candidate->tunnel_key_assigned = true;
+            vector_push(&synced_datapaths->synced_dps, &candidate->sdp);
         }
     }
 }
@@ -234,9 +234,8 @@ allocate_tunnel_keys(struct vector *candidate_sdps,
         }
         sbrec_datapath_binding_set_tunnel_key(candidate->sdp->sb_dp,
                                               tunnel_key);
-        ovs_list_push_back(&synced_datapaths->synced_dps,
-                           &candidate->sdp->list_node);
         candidate->tunnel_key_assigned = true;
+        vector_push(&synced_datapaths->synced_dps, &candidate->sdp);
     }
 }
 
@@ -251,6 +250,17 @@ delete_unassigned_candidates(struct vector *candidate_sdps)
         sbrec_datapath_binding_delete(candidate->sdp->sb_dp);
         free(candidate->sdp);
     }
+}
+
+static int
+synced_dp_cmp(const void *a_, const void *b_)
+{
+    const struct ovn_synced_datapath *const *a__ = a_;
+    const struct ovn_synced_datapath *const *b__ = b_;
+    const struct ovn_synced_datapath *a = *a__;
+    const struct ovn_synced_datapath *b = *b__;
+
+    return uuid_compare_3way(&a->nb_row->uuid, &b->nb_row->uuid);
 }
 
 enum engine_node_state
@@ -303,6 +313,11 @@ en_datapath_sync_run(struct engine_node *node , void *data)
 
     ovn_destroy_tnlids(&dp_tnlids);
 
+    /* Sort the synced_datapaths. This ensures the order is consistent between
+     * runs when no new datapaths have been inserted or deleted.
+     */
+    vector_qsort(&synced_datapaths->synced_dps, synced_dp_cmp);
+
     return EN_UPDATED;
 }
 
@@ -311,7 +326,8 @@ void en_datapath_sync_cleanup(void *data)
     struct ovn_synced_datapaths *synced_datapaths = data;
     struct ovn_synced_datapath *sdp;
 
-    LIST_FOR_EACH_POP (sdp, list_node, &synced_datapaths->synced_dps) {
+    VECTOR_FOR_EACH (&synced_datapaths->synced_dps, sdp) {
         free(sdp);
     }
+    vector_destroy(&synced_datapaths->synced_dps);
 }
