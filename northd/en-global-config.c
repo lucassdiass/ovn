@@ -392,6 +392,7 @@ enum engine_input_handler_result
 global_config_nb_logical_switch_handler(struct engine_node *node,
                                         void *data)
 {
+    VLOG_INFO("LUCAS global_config_nb_logical_switch_handler");
     struct ed_type_global_config *config_data = data;
     const struct nbrec_logical_switch_table *nbrec_ls_table =
         EN_OVSDB_GET(engine_get_input("NB_logical_switch", node));
@@ -415,8 +416,10 @@ global_config_nb_logical_switch_handler(struct engine_node *node,
     const char *cur_max_tunid = smap_get(options, "max_tunid");
 
     if (!cur_max_tunid || strcmp(max_tunid, cur_max_tunid)) {
+        VLOG_INFO("LUCAS global_config_nb_logical_switch_handler EN_HANDLED_UPDATED");
         result = EN_HANDLED_UPDATED;
     } else {
+        VLOG_INFO("LUCAS global_config_nb_logical_switch_handler EN_HANDLED_UNCHANGED");
         result = EN_HANDLED_UNCHANGED;
     }
 

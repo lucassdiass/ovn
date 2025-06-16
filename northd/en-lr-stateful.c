@@ -132,6 +132,7 @@ en_lr_stateful_run(struct engine_node *node, void *data_)
 enum engine_input_handler_result
 lr_stateful_northd_handler(struct engine_node *node, void *data OVS_UNUSED)
 {
+    VLOG_INFO("LUCAS lr_stateful_northd_handler");
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     if (!northd_has_tracked_data(&northd_data->trk_data)) {
         return EN_UNHANDLED;

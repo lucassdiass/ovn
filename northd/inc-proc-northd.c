@@ -33,6 +33,7 @@
 #include "en-lb-data.h"
 #include "en-lr-stateful.h"
 #include "en-lr-nat.h"
+#include "en-ls-ipam.h"
 #include "en-ls-stateful.h"
 #include "en-multicast.h"
 #include "en-northd.h"
@@ -256,6 +257,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lr_stateful, &en_lb_data,
                      lr_stateful_lb_data_handler);
 
+    engine_add_input(&en_ls_stateful, &en_northd, ls_ipam_northd_handler);
     engine_add_input(&en_ls_stateful, &en_northd, ls_stateful_northd_handler);
     engine_add_input(&en_ls_stateful, &en_port_group,
                      ls_stateful_port_group_handler);

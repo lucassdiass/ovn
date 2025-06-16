@@ -107,6 +107,7 @@ lflow_get_input_data(struct engine_node *node,
 enum engine_node_state
 en_lflow_run(struct engine_node *node, void *data)
 {
+    VLOG_INFO("LUCAS en_lflow_run");
     const struct engine_context *eng_ctx = engine_get_context();
 
     struct lflow_input lflow_input;

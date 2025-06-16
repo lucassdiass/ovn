@@ -145,6 +145,8 @@ enum engine_input_handler_result
 northd_nb_logical_switch_handler(struct engine_node *node,
                                  void *data)
 {
+    VLOG_INFO("LUCAS northd_nb_logical_switch_handler");
+
     const struct engine_context *eng_ctx = engine_get_context();
     struct northd_data *nd = data;
 
@@ -153,13 +155,15 @@ northd_nb_logical_switch_handler(struct engine_node *node,
     northd_get_input_data(node, &input_data);
 
     if (!northd_handle_ls_changes(eng_ctx->ovnsb_idl_txn, &input_data, nd)) {
+        VLOG_INFO("LUCAS northd_nb_logical_switch_handler EN_UNHANDLED");
         return EN_UNHANDLED;
     }
 
     if (northd_has_tracked_data(&nd->trk_data)) {
+        VLOG_INFO("LUCAS northd_nb_logical_switch_handler EN_HANDLED_UPDATED");
         return EN_HANDLED_UPDATED;
     }
-
+    VLOG_INFO("LUCAS northd_nb_logical_switch_handler EN_HANDLED_UNCHANGED");
     return EN_HANDLED_UNCHANGED;
 }
 

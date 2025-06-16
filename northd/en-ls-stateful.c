@@ -109,6 +109,7 @@ en_ls_stateful_clear_tracked_data(void *data_)
 enum engine_node_state
 en_ls_stateful_run(struct engine_node *node, void *data_)
 {
+    VLOG_INFO("LUCAS en_ls_stateful_run");
     struct ls_stateful_input input_data = ls_stateful_get_input_data(node);
     struct ed_type_ls_stateful *data = data_;
 
@@ -126,13 +127,16 @@ en_ls_stateful_run(struct engine_node *node, void *data_)
 enum engine_input_handler_result
 ls_stateful_northd_handler(struct engine_node *node, void *data_)
 {
+    VLOG_INFO("LUCAS ls_stateful_northd_handler");
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     if (!northd_has_tracked_data(&northd_data->trk_data)) {
+        VLOG_INFO("LUCAS ls_stateful_northd_handler EN_UNHANDLED");
         return EN_UNHANDLED;
     }
 
     if (!northd_has_ls_lbs_in_tracked_data(&northd_data->trk_data) &&
         !northd_has_ls_acls_in_tracked_data(&northd_data->trk_data)) {
+        VLOG_INFO("LUCAS ls_stateful_northd_handler EN_HANDLED_UNCHANGED");
         return EN_HANDLED_UNCHANGED;
     }
 
@@ -167,9 +171,10 @@ ls_stateful_northd_handler(struct engine_node *node, void *data_)
     }
 
     if (ls_stateful_has_tracked_data(&data->trk_data)) {
+        VLOG_INFO("LUCAS ls_stateful_northd_handler EN_HANDLED_UPDATED");
         return EN_HANDLED_UPDATED;
     }
-
+    VLOG_INFO("LUCAS ls_stateful_northd_handler EN_HANDLED_UNCHANGED");
     return EN_HANDLED_UNCHANGED;
 }
 

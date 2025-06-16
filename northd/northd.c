@@ -4709,7 +4709,7 @@ lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *nbsp)
     for (size_t j = 0; j < nbsp->n_addresses; j++) {
         /* Dynamic address handling is not supported for now. */
         if (is_dynamic_lsp_address(nbsp->addresses[j])) {
-            return false;
+            return true;
         }
         /* "unknown" address handling is not supported for now.  XXX: Need to
          * handle od->has_unknown change and track it when the first LSP with
@@ -4849,6 +4849,8 @@ ls_changes_can_be_handled(
                 col == NBREC_LOGICAL_SWITCH_COL_LOAD_BALANCER ||
                 col == NBREC_LOGICAL_SWITCH_COL_LOAD_BALANCER_GROUP) {
                 continue;
+            } else if (col == NBREC_LOGICAL_SWITCH_COL_OTHER_CONFIG) {
+                return true;
             }
             return false;
         }
@@ -4968,9 +4970,11 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                       struct tracked_ovn_ports *trk_lsps)
 {
     bool ls_ports_changed = false;
-    if (!nbrec_logical_switch_is_updated(changed_ls,
-                                         NBREC_LOGICAL_SWITCH_COL_PORTS)) {
 
+    if (!nbrec_logical_switch_is_updated(changed_ls,
+                                         NBREC_LOGICAL_SWITCH_COL_PORTS) &&
+        !nbrec_logical_switch_is_updated(changed_ls,
+                                         NBREC_LOGICAL_SWITCH_COL_OTHER_CONFIG)) {
         for (size_t i = 0; i < changed_ls->n_ports; i++) {
             if (nbrec_logical_switch_port_row_get_seqno(
                 changed_ls->ports[i], OVSDB_IDL_CHANGE_MODIFY) > 0) {
@@ -5131,6 +5135,11 @@ is_ls_acls_changed(const struct nbrec_logical_switch *nbs) {
             || is_acls_seqno_changed(nbs->acls, nbs->n_acls));
 }
 
+static bool
+is_ls_ipam_changed(const struct nbrec_logical_switch *nbs) {
+    return nbrec_logical_switch_is_updated(nbs, NBREC_LOGICAL_SWITCH_COL_OTHER_CONFIG);
+}
+
 /* Return true if changes are handled incrementally, false otherwise.
  * When there are any changes, try to track what's exactly changed and set
  * northd_data->trk_data accordingly.
@@ -5176,6 +5185,9 @@ northd_handle_ls_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         if (is_ls_acls_changed(changed_ls)) {
             hmapx_add(&trk_data->ls_with_changed_acls, od);
         }
+        else if (is_ls_ipam_changed(changed_ls)) {
+            hmapx_add(&trk_data->ls_with_changed_ipam, od);
+        }
     }
 
     if (!hmapx_is_empty(&trk_data->trk_lsps.created)
@@ -5188,6 +5200,10 @@ northd_handle_ls_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         trk_data->type |= NORTHD_TRACKED_LS_ACLS;
     }
 
+    if (!hmapx_is_empty(&trk_data->ls_with_changed_ipam)) {
+        trk_data->type |= NORTHD_TRACKED_LS_IPAM;
+    }
+    
     return true;
 
 fail:
@@ -19466,7 +19482,7 @@ ovnnb_db_run(struct northd_input *input_data,
     build_lb_count_dps(&data->lb_datapaths_map,
                        ods_size(&data->ls_datapaths),
                        ods_size(&data->lr_datapaths));
-    build_ipam(&data->ls_datapaths.datapaths, &data->ls_ports);
+    //build_ipam(&data->ls_datapaths.datapaths, &data->ls_ports);
     build_lrouter_groups(&data->lr_ports, &data->lr_datapaths);
     build_ip_mcast(ovnsb_txn, input_data->sbrec_ip_multicast_table,
                    input_data->sbrec_ip_mcast_by_dp,

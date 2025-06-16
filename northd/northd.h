@@ -139,6 +139,7 @@ enum northd_tracked_data_type {
     NORTHD_TRACKED_LR_NATS  = (1 << 2),
     NORTHD_TRACKED_LS_LBS   = (1 << 3),
     NORTHD_TRACKED_LS_ACLS  = (1 << 4),
+    NORTHD_TRACKED_LS_IPAM  = (1 << 5),
 };
 
 /* Track what's changed in the northd engine node.
@@ -161,6 +162,10 @@ struct northd_tracked_data {
     /* Tracked logical switches whose ACLs have changed.
      * hmapx node is 'struct ovn_datapath *'. */
     struct hmapx ls_with_changed_acls;
+
+    /* Tracked logical switches whose IPAM has changed.
+     * hmapx node is 'struct ovn_datapath *'. */
+    struct hmapx ls_with_changed_ipam;
 };
 
 struct northd_data {
@@ -957,6 +962,12 @@ static inline bool
 northd_has_ls_acls_in_tracked_data(struct northd_tracked_data *trk_nd_changes)
 {
     return trk_nd_changes->type & NORTHD_TRACKED_LS_ACLS;
+}
+
+static inline bool
+northd_has_ls_ipam_in_tracked_data(struct northd_tracked_data *trk_nd_changes)
+{
+    return trk_nd_changes->type & NORTHD_TRACKED_LS_IPAM;
 }
 
 /* Returns 'true' if the IPv4 'addr' is on the same subnet with one of the

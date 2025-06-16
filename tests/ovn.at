@@ -9183,9 +9183,13 @@ check ovn-nbctl --wait=sb sync
 # Add a port to a switch that does not have a subnet set, then set the
 # subnet which should result in an address being allocated for the port.
 check ovn-nbctl --wait=hv set NB_Global . options:mac_prefix="0a:00:00:00:00:00"
+sleep 2
 check ovn-nbctl ls-add sw0
+sleep 2
 check ovn-nbctl lsp-add sw0 p0 -- lsp-set-addresses p0 dynamic
+sleep 2
 check ovn-nbctl --wait=sb add Logical-Switch sw0 other_config subnet=192.168.1.0/24
+sleep 2
 check_dynamic_addresses p0 "0a:00:00:a8:01:03 192.168.1.2"
 
 # Add 9 more ports to sw0, addresses should all be unique.
