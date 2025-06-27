@@ -47,6 +47,7 @@
 #include "en-advertised-route-sync.h"
 #include "en-learned-route-sync.h"
 #include "en-group-ecmp-route.h"
+#include "en-ls-ipam.h"
 #include "unixctl.h"
 #include "util.h"
 
@@ -179,6 +180,7 @@ static ENGINE_NODE(advertised_route_sync);
 static ENGINE_NODE(learned_route_sync, CLEAR_TRACKED_DATA);
 static ENGINE_NODE(dynamic_routes);
 static ENGINE_NODE(group_ecmp_route, CLEAR_TRACKED_DATA);
+static ENGINE_NODE(ls_ipam);
 
 void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                           struct ovsdb_idl_loop *sb)
@@ -256,6 +258,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lr_stateful, &en_lb_data,
                      lr_stateful_lb_data_handler);
 
+    engine_add_input(&en_ls_ipam, &en_northd, ls_ipam_handler);
     engine_add_input(&en_ls_stateful, &en_northd, ls_stateful_northd_handler);
     engine_add_input(&en_ls_stateful, &en_port_group,
                      ls_stateful_port_group_handler);
@@ -355,6 +358,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                      lflow_multicast_igmp_handler);
     engine_add_input(&en_lflow, &en_sb_acl_id, NULL);
 
+    engine_add_input(&en_lflow, &en_ls_ipam, engine_noop_handler);
     engine_add_input(&en_sync_to_sb_addr_set, &en_northd, NULL);
     engine_add_input(&en_sync_to_sb_addr_set, &en_lr_stateful, NULL);
     engine_add_input(&en_sync_to_sb_addr_set, &en_sb_address_set, NULL);

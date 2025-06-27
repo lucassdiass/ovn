@@ -88,7 +88,7 @@ struct ls_stateful_table {
 };
 
 #define LS_STATEFUL_TABLE_FOR_EACH(LS_STATEFUL_REC, TABLE) \
-    HMAP_FOR_EACH (LS_STATEFUL_REC, key_node, &(TABLE)->entries)
+    HMAP_FOR_EACH_SAFE (LS_STATEFUL_REC, key_node, &(TABLE)->entries)
 
 #define LS_STATEFUL_TABLE_FOR_EACH_IN_P(LS_STATEFUL_REC, JOBID, TABLE) \
     HMAP_FOR_EACH_IN_PARALLEL (LS_STATEFUL_REC, key_node, JOBID, \

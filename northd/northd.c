@@ -605,18 +605,6 @@ lrouter_is_enabled(const struct nbrec_logical_router *lrouter)
 }
 
 static void
-init_ipam_info_for_datapath(struct ovn_datapath *od)
-{
-    if (!od->nbs) {
-        return;
-    }
-
-    char uuid_s[UUID_LEN + 1];
-    sprintf(uuid_s, UUID_FMT, UUID_ARGS(&od->key));
-    init_ipam_info(&od->ipam_info, &od->nbs->other_config, uuid_s);
-}
-
-static void
 init_mcast_info_for_router_datapath(struct ovn_datapath *od)
 {
     struct mcast_router_info *mcast_rtr_info = &od->mcast_info.rtr;
@@ -1289,9 +1277,15 @@ ovn_port_cleanup(struct ovn_port *port)
         ovn_free_tnlid(&port->od->port_tnlids, port->tunnel_key);
     }
     for (int i = 0; i < port->n_lsp_addrs; i++) {
+        //uint64_t mac64 = eth_addr_to_uint64(port->lsp_addrs[i].ea);
+        //VLOG_INFO("LUCAS rem %s %lu", port->lsp_addrs->ea_s, mac64);
+        //remove_mac_from_macam(&port->lsp_addrs[i].ea);
         destroy_lport_addresses(&port->lsp_addrs[i]);
     }
-    free(port->lsp_addrs);
+    if (port->n_lsp_addrs) {
+        free(port->lsp_addrs);
+    }
+
     port->n_lsp_addrs = 0;
     port->lsp_addrs = NULL;
 
@@ -1300,9 +1294,12 @@ ovn_port_cleanup(struct ovn_port *port)
     }
 
     for (int i = 0; i < port->n_ps_addrs; i++) {
+        //remove_mac_from_macam(&port->ps_addrs[i].ea);
         destroy_lport_addresses(&port->ps_addrs[i]);
     }
-    free(port->ps_addrs);
+    if (port->n_ps_addrs) {
+        free(port->ps_addrs);
+    }
     port->ps_addrs = NULL;
     port->n_ps_addrs = 0;
 
@@ -1500,68 +1497,6 @@ ovn_port_get_peer(const struct hmap *lr_ports, struct ovn_port *op)
     }
 
     return ovn_port_find(lr_ports, peer_name);
-}
-
-static void
-ipam_insert_ip_for_datapath(struct ovn_datapath *od, uint32_t ip, bool dynamic)
-{
-    if (!od) {
-        return;
-    }
-
-    ipam_insert_ip(&od->ipam_info, ip, dynamic);
-}
-
-static void
-ipam_insert_lsp_addresses(struct ovn_datapath *od,
-                          struct lport_addresses *laddrs)
-{
-    ipam_insert_mac(&laddrs->ea, true);
-
-    /* IP is only added to IPAM if the switch's subnet option
-     * is set, whereas MAC is always added to MACAM. */
-    if (!od->ipam_info.allocated_ipv4s) {
-        return;
-    }
-
-    for (size_t j = 0; j < laddrs->n_ipv4_addrs; j++) {
-        uint32_t ip = ntohl(laddrs->ipv4_addrs[j].addr);
-        ipam_insert_ip_for_datapath(od, ip, false);
-    }
-}
-
-static void
-ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
-{
-    if (!od || !op) {
-        return;
-    }
-
-    if (op->n_lsp_non_router_addrs) {
-        /* Add all the port's addresses to address data structures. */
-        for (size_t i = 0; i < op->n_lsp_non_router_addrs; i++) {
-            ipam_insert_lsp_addresses(od, &op->lsp_addrs[i]);
-        }
-    } else if (op->lrp_networks.ea_s[0]) {
-        ipam_insert_mac(&op->lrp_networks.ea, true);
-
-        if (!op->peer || !op->peer->nbsp || !op->peer->od || !op->peer->od->nbs
-            || !smap_get(&op->peer->od->nbs->other_config, "subnet")) {
-            return;
-        }
-
-        for (size_t i = 0; i < op->lrp_networks.n_ipv4_addrs; i++) {
-            uint32_t ip = ntohl(op->lrp_networks.ipv4_addrs[i].addr);
-            /* If the router has the first IP address of the subnet, don't add
-             * it to IPAM. We already added this when we initialized IPAM for
-             * the datapath. This will just result in an erroneous message
-             * about a duplicate IP address.
-             */
-            if (ip != op->peer->od->ipam_info.start_ipv4) {
-                ipam_insert_ip_for_datapath(op->peer->od, ip, false);
-            }
-        }
-    }
 }
 
 /* Returns true if the given router port 'op' (assumed to be a distributed
@@ -1776,12 +1711,16 @@ static void
 update_unchanged_dynamic_addresses(struct dynamic_address_update *update)
 {
     if (update->mac == NONE) {
+        //VLOG_INFO("LUCAS %s ipam_insert_mac %s", __func__, update->op->nbsp ?
+        //                                                   update->op->nbsp->name : "LRP");
         ipam_insert_mac(&update->current_addresses.ea, false);
     }
     if (update->ipv4 == NONE && update->current_addresses.n_ipv4_addrs) {
         ipam_insert_ip_for_datapath(update->op->od,
                        ntohl(update->current_addresses.ipv4_addrs[0].addr),
                        true);
+        //VLOG_INFO("LUCAS %s ipam_insert_ip_for_datapath %s", __func__, update->op->nbsp ?
+        //                                                   update->op->nbsp->name : "LRP");
     }
 }
 
@@ -1915,14 +1854,107 @@ update_dynamic_addresses(struct dynamic_address_update *update)
     if (!IN6_ARE_ADDR_EQUAL(&ip6, &in6addr_any)) {
         char ip6_s[INET6_ADDRSTRLEN + 1];
         ipv6_string_mapped(ip6_s, &ip6);
+        ip6_s[INET6_ADDRSTRLEN] = '\0';
         ds_put_format(&new_addr, " %s", ip6_s);
     }
-    nbrec_logical_switch_port_set_dynamic_addresses(update->op->nbsp,
-                                                    ds_cstr(&new_addr));
-    set_lsp_dynamic_addresses(ds_cstr(&new_addr), update->op);
+    if (update->mac != NONE || ip4 || !IN6_ARE_ADDR_EQUAL(&ip6, &in6addr_any)) {
+        //VLOG_INFO("LUCAS %s ipam_insert_mac", __func__);
+        nbrec_logical_switch_port_set_dynamic_addresses(update->op->nbsp,
+                                                        ds_cstr(&new_addr));
+        set_lsp_dynamic_addresses(ds_cstr(&new_addr), update->op);
+    }
     ds_destroy(&new_addr);
 }
 
+bool 
+update_ipam_from_ls(struct ovn_datapath *od, struct hmap *ls_ports,
+                    bool recompute)
+{
+    struct ovs_list updates;
+
+    ovs_list_init(&updates);
+    for (size_t i = 0; i < od->nbs->n_ports; i++) {
+        const struct nbrec_logical_switch_port *nbsp = od->nbs->ports[i];
+
+        if (!od->ipam_info.allocated_ipv4s &&
+            !od->ipam_info.ipv6_prefix_set &&
+            !od->ipam_info.mac_only) {
+            if (nbsp->dynamic_addresses) {
+                nbrec_logical_switch_port_set_dynamic_addresses(nbsp,
+                                                                NULL);
+            }
+            continue;
+        }
+
+        struct ovn_port *op = ovn_port_find(ls_ports, nbsp->name);
+        if (!op || op->nbsp != nbsp || op->peer) {
+            /* Do not allocate addresses for logical switch ports that
+             * have a peer. */
+            continue;
+        }
+
+        int num_dynamic_addresses = 0;
+        for (size_t j = 0; j < nbsp->n_addresses; j++) {
+            if (!is_dynamic_lsp_address(nbsp->addresses[j])) {
+                continue;
+            }
+            if (num_dynamic_addresses) {
+                static struct vlog_rate_limit rl
+                    = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "More than one dynamic address "
+                             "configured for logical switch port '%s'",
+                             nbsp->name);
+                continue;
+            }
+            num_dynamic_addresses++;
+            struct dynamic_address_update *update
+                = xzalloc(sizeof *update);
+            update->op = op;
+            update->od = od;
+            if (nbsp->dynamic_addresses) {
+                bool any_changed;
+                extract_lsp_addresses(nbsp->dynamic_addresses,
+                                      &update->current_addresses);
+                any_changed = dynamic_addresses_check_for_updates(
+                    nbsp->addresses[j], update);
+                update_unchanged_dynamic_addresses(update);
+                if (any_changed) {
+                    ovs_list_push_back(&updates, &update->node);
+                } else {
+                    /* No changes to dynamic addresses */
+                    if (recompute)
+                        set_lsp_dynamic_addresses (nbsp->dynamic_addresses, op);
+                    ipam_insert_lsp_addresses(od, &update->current_addresses);
+                    destroy_lport_addresses(&update->current_addresses);
+                    free(update);
+                }
+            } else {
+                set_dynamic_updates(nbsp->addresses[j], update);
+                ovs_list_push_back(&updates, &update->node);
+            }
+        }
+
+        if (!num_dynamic_addresses && nbsp->dynamic_addresses) {
+            nbrec_logical_switch_port_set_dynamic_addresses(nbsp, NULL);
+        }
+        // Add to cache for avoid duplicate IPs or MACs
+        ipam_add_port_addresses(od, op);
+    }
+
+    if (ovs_list_is_empty(&updates)) {
+        return false;
+    }
+    /* After retaining all unchanged dynamic addresses, now assign
+     * new ones.
+     */
+    struct dynamic_address_update *update;
+    LIST_FOR_EACH_POP (update, node, &updates) {
+        update_dynamic_addresses(update);
+        destroy_lport_addresses(&update->current_addresses);
+        free(update);
+    }
+    return true;
+}
 static void
 build_ipam(struct hmap *ls_datapaths, struct hmap *ls_ports)
 {
@@ -1935,86 +1967,10 @@ build_ipam(struct hmap *ls_datapaths, struct hmap *ls_ports)
     /* If the switch's other_config:subnet is set, allocate new addresses for
      * ports that have the "dynamic" keyword in their addresses column. */
     struct ovn_datapath *od;
-    struct ovs_list updates;
 
-    ovs_list_init(&updates);
     HMAP_FOR_EACH (od, key_node, ls_datapaths) {
         ovs_assert(od->nbs);
-
-        for (size_t i = 0; i < od->nbs->n_ports; i++) {
-            const struct nbrec_logical_switch_port *nbsp = od->nbs->ports[i];
-
-            if (!od->ipam_info.allocated_ipv4s &&
-                !od->ipam_info.ipv6_prefix_set &&
-                !od->ipam_info.mac_only) {
-                if (nbsp->dynamic_addresses) {
-                    nbrec_logical_switch_port_set_dynamic_addresses(nbsp,
-                                                                    NULL);
-                }
-                continue;
-            }
-
-            struct ovn_port *op = ovn_port_find(ls_ports, nbsp->name);
-            if (!op || op->nbsp != nbsp || op->peer) {
-                /* Do not allocate addresses for logical switch ports that
-                 * have a peer. */
-                continue;
-            }
-
-            int num_dynamic_addresses = 0;
-            for (size_t j = 0; j < nbsp->n_addresses; j++) {
-                if (!is_dynamic_lsp_address(nbsp->addresses[j])) {
-                    continue;
-                }
-                if (num_dynamic_addresses) {
-                    static struct vlog_rate_limit rl
-                        = VLOG_RATE_LIMIT_INIT(1, 1);
-                    VLOG_WARN_RL(&rl, "More than one dynamic address "
-                                 "configured for logical switch port '%s'",
-                                 nbsp->name);
-                    continue;
-                }
-                num_dynamic_addresses++;
-                struct dynamic_address_update *update
-                    = xzalloc(sizeof *update);
-                update->op = op;
-                update->od = od;
-                if (nbsp->dynamic_addresses) {
-                    bool any_changed;
-                    extract_lsp_addresses(nbsp->dynamic_addresses,
-                                          &update->current_addresses);
-                    any_changed = dynamic_addresses_check_for_updates(
-                        nbsp->addresses[j], update);
-                    update_unchanged_dynamic_addresses(update);
-                    if (any_changed) {
-                        ovs_list_push_back(&updates, &update->node);
-                    } else {
-                        /* No changes to dynamic addresses */
-                        set_lsp_dynamic_addresses(nbsp->dynamic_addresses, op);
-                        destroy_lport_addresses(&update->current_addresses);
-                        free(update);
-                    }
-                } else {
-                    set_dynamic_updates(nbsp->addresses[j], update);
-                    ovs_list_push_back(&updates, &update->node);
-                }
-            }
-
-            if (!num_dynamic_addresses && nbsp->dynamic_addresses) {
-                nbrec_logical_switch_port_set_dynamic_addresses(nbsp, NULL);
-            }
-        }
-
-    }
-
-    /* After retaining all unchanged dynamic addresses, now assign
-     * new ones.
-     */
-    struct dynamic_address_update *update;
-    LIST_FOR_EACH_POP (update, node, &updates) {
-        update_dynamic_addresses(update);
-        destroy_lport_addresses(&update->current_addresses);
-        free(update);
+        update_ipam_from_ls(od, ls_ports, true);
     }
 }
 
@@ -4650,6 +4606,7 @@ destroy_northd_data_tracked_changes(struct northd_data *nd)
     hmapx_clear(&trk_changes->trk_nat_lrs);
     hmapx_clear(&trk_changes->ls_with_changed_lbs);
     hmapx_clear(&trk_changes->ls_with_changed_acls);
+    hmapx_clear(&trk_changes->ls_with_changed_ipam);
     trk_changes->type = NORTHD_TRACKED_NONE;
 }
 
@@ -4666,6 +4623,7 @@ init_northd_tracked_data(struct northd_data *nd)
     hmapx_init(&trk_data->trk_nat_lrs);
     hmapx_init(&trk_data->ls_with_changed_lbs);
     hmapx_init(&trk_data->ls_with_changed_acls);
+    hmapx_init(&trk_data->ls_with_changed_ipam);
 }
 
 static void
@@ -4707,10 +4665,11 @@ lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *nbsp)
     }
 
     for (size_t j = 0; j < nbsp->n_addresses; j++) {
-        /* Dynamic address handling is not supported for now. */
-        if (is_dynamic_lsp_address(nbsp->addresses[j])) {
-            return false;
-        }
+        /* Dynamic address was handled previously. */
+        //if (is_dynamic_lsp_address(nbsp->addresses[j]) &&
+        //    nbsp->dynamic_addresses) {
+        //    return false;
+        //}
         /* "unknown" address handling is not supported for now.  XXX: Need to
          * handle od->has_unknown change and track it when the first LSP with
          * 'unknown' is added or when the last one is removed. */
@@ -4760,6 +4719,7 @@ ls_port_init(struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
              struct ovsdb_idl_index *sbrec_chassis_by_hostname)
 {
     op->od = od;
+
     parse_lsp_addrs(op);
     /* Assign explicitly requested tunnel ids first. */
     if (!ovn_port_assign_requested_tnl_id(op)) {
@@ -4820,6 +4780,10 @@ ls_port_reinit(struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
                 struct ovsdb_idl_index *sbrec_chassis_by_name,
                 struct ovsdb_idl_index *sbrec_chassis_by_hostname)
 {
+    VLOG_INFO("LUCAS reinit %s", op->nbsp->name);
+    for (size_t i = 0; i <  op->nbsp->n_addresses; i++) {
+        VLOG_INFO("LUCAS %s %s", op->nbsp->name, op->nbsp->addresses[i]);
+    }
     ovn_port_cleanup(op);
     op->sb = sb;
     ovn_port_set_nb(op, nbsp, NULL);
@@ -4835,6 +4799,7 @@ ls_port_reinit(struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
  *    - load balancers.
  *    - load balancer groups.
  *    - ACLs
+ *    - ipam
  */
 static bool
 ls_changes_can_be_handled(
@@ -4846,6 +4811,7 @@ ls_changes_can_be_handled(
         if (nbrec_logical_switch_is_updated(ls, col)) {
             if (col == NBREC_LOGICAL_SWITCH_COL_ACLS ||
                 col == NBREC_LOGICAL_SWITCH_COL_PORTS ||
+                //col == NBREC_LOGICAL_SWITCH_COL_OTHER_CONFIG ||
                 col == NBREC_LOGICAL_SWITCH_COL_LOAD_BALANCER ||
                 col == NBREC_LOGICAL_SWITCH_COL_LOAD_BALANCER_GROUP) {
                 continue;
@@ -4884,6 +4850,8 @@ ls_changes_can_be_handled(
 static bool
 check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
 {
+     VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
     /* Check if the columns are changed in this row. */
     enum nbrec_logical_switch_port_column_id col;
     for (col = 0; col < NBREC_LOGICAL_SWITCH_PORT_N_COLUMNS; col++) {
@@ -4892,6 +4860,7 @@ check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
             return true;
         }
     }
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
     /* Check if the referenced rows are changed.
        XXX: Need a better OVSDB IDL interface for this check. */
@@ -4900,22 +4869,30 @@ check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
                                          OVSDB_IDL_CHANGE_MODIFY) > 0) {
         return true;
     }
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
     if (nbsp->dhcpv6_options &&
         nbrec_dhcp_options_row_get_seqno(nbsp->dhcpv6_options,
                                          OVSDB_IDL_CHANGE_MODIFY) > 0) {
         return true;
     }
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
     if (nbsp->ha_chassis_group &&
         nbrec_ha_chassis_group_row_get_seqno(nbsp->ha_chassis_group,
                                              OVSDB_IDL_CHANGE_MODIFY) > 0) {
         return true;
     }
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
     for (size_t i = 0; i < nbsp->n_mirror_rules; i++) {
         if (nbrec_mirror_row_get_seqno(nbsp->mirror_rules[i],
                                        OVSDB_IDL_CHANGE_MODIFY) > 0) {
             return true;
         }
     }
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
     return false;
 }
 
@@ -4967,6 +4944,8 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                       struct ovn_datapath *od,
                       struct tracked_ovn_ports *trk_lsps)
 {
+    VLOG_INFO("LUCAS start %s %d", __func__, __LINE__);
+
     bool ls_ports_changed = false;
     if (!nbrec_logical_switch_is_updated(changed_ls,
                                          NBREC_LOGICAL_SWITCH_COL_PORTS)) {
@@ -5013,6 +4992,8 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
             }
             add_op_to_northd_tracked_ports(&trk_lsps->created, op);
         } else if (ls_port_has_changed(new_nbsp)) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
             /* Existing port updated */
             bool temp = false;
             if (lsp_is_type_changed(op->sb, new_nbsp, &temp) ||
@@ -5020,12 +5001,16 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 !lsp_can_be_inc_processed(new_nbsp)) {
                 goto fail;
             }
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
             const struct sbrec_port_binding *sb = op->sb;
             if (sset_contains(&nd->svc_monitor_lsps, new_nbsp->name)) {
                 /* This port is used for svc monitor, which may be impacted
                  * by this change. Fallback to recompute. */
                 goto fail;
             }
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
             if (!lsp_handle_mirror_rules_changes(op) ||
                  is_lsp_mirror_target_port(ni->nbrec_mirror_by_type_and_sink,
                                            op)) {
@@ -5040,6 +5025,7 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 op->visited = true;
                 continue;
             }
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
             uint32_t old_tunnel_key = op->tunnel_key;
             if (!ls_port_reinit(op, ovnsb_idl_txn,
@@ -5053,6 +5039,8 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 ovn_port_destroy(&nd->ls_ports, op);
                 goto fail;
             }
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
             add_op_to_northd_tracked_ports(&trk_lsps->updated, op);
 
             if (old_tunnel_key != op->tunnel_key) {
@@ -5074,6 +5062,7 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                  * impacted by this deletion. Fallback to recompute. */
                 goto fail;
             }
+            //VLOG_INFO("LUCAS DELETE %s %d", __func__, __LINE__);
             add_op_to_northd_tracked_ports(&trk_lsps->deleted, op);
             hmap_remove(&nd->ls_ports, &op->key_node);
             hmap_remove(&od->ports, &op->dp_node);
@@ -5105,6 +5094,19 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         }
     }
 
+    if (!hmapx_is_empty(&trk_lsps->created)) {
+        VLOG_INFO("LUCAS created is not empty");
+    }
+
+
+    if (!hmapx_is_empty(&trk_lsps->deleted)) {
+        VLOG_INFO("LUCAS deleted is not empty");
+    }
+
+
+    if (!hmapx_is_empty(&trk_lsps->updated)) {
+        VLOG_INFO("LUCAS updated is not empty");
+    }
     return true;
 
 fail:
@@ -5129,6 +5131,11 @@ static bool
 is_ls_acls_changed(const struct nbrec_logical_switch *nbs) {
     return (nbrec_logical_switch_is_updated(nbs, NBREC_LOGICAL_SWITCH_COL_ACLS)
             || is_acls_seqno_changed(nbs->acls, nbs->n_acls));
+}
+
+static bool
+is_ls_ipam_changed(const struct nbrec_logical_switch *nbs) {
+    return nbrec_logical_switch_is_updated(nbs, NBREC_LOGICAL_SWITCH_COL_OTHER_CONFIG);
 }
 
 /* Return true if changes are handled incrementally, false otherwise.
@@ -5175,6 +5182,16 @@ northd_handle_ls_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
         if (is_ls_acls_changed(changed_ls)) {
             hmapx_add(&trk_data->ls_with_changed_acls, od);
+        } else if (is_ls_ipam_changed(changed_ls)) {
+            hmapx_add(&trk_data->ls_with_changed_ipam, od);
+        } else {
+            init_ipam_info_for_datapath(od);
+            bool has_ipam = od->ipam_info.mac_only ||
+                            od->ipam_info.allocated_ipv4s ||
+                            od->ipam_info.ipv6_prefix_set;
+            if (has_ipam) {
+                hmapx_add(&trk_data->ls_with_changed_ipam, od);
+            }
         }
     }
 
@@ -5186,6 +5203,11 @@ northd_handle_ls_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     if (!hmapx_is_empty(&trk_data->ls_with_changed_acls)) {
         trk_data->type |= NORTHD_TRACKED_LS_ACLS;
+    }
+
+
+    if (!hmapx_is_empty(&trk_data->ls_with_changed_ipam)) {
+        trk_data->type |= NORTHD_TRACKED_LS_IPAM;
     }
 
     return true;
@@ -18529,6 +18551,7 @@ lflow_reset_northd_refs(struct lflow_input *lflow_input)
     struct ls_stateful_record *ls_stateful_rec;
     struct ovn_lb_datapaths *lb_dps;
     struct ovn_port *op;
+
 
     LR_STATEFUL_TABLE_FOR_EACH (lr_stateful_rec,
                                 lflow_input->lr_stateful_table) {

@@ -176,9 +176,10 @@ parse_and_store_addresses(const char *address, struct lport_addresses *laddrs,
             *ofs = 0;
             return false;
         }
-
         snprintf(laddrs->ea_s, sizeof laddrs->ea_s, ETH_ADDR_FMT,
                  ETH_ADDR_ARGS(laddrs->ea));
+        //uint64_t eth_addr_to_uint64(const struct eth_addr ea);
+        //VLOG_INFO("LUCAS %s %lu", __func__, eth_addr_to_uint64(laddrs->ea));
     }
 
     ovs_be32 ip4;
@@ -248,7 +249,10 @@ extract_lsp_addresses(const char *address, struct lport_addresses *laddrs)
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
         VLOG_INFO_RL(&rl, "invalid syntax '%s' in address", address);
     }
-
+    if (success) {
+        uint64_t mac64 = eth_addr_to_uint64(laddrs->ea);
+        VLOG_INFO("LUCAS parse new mac %lu", mac64);
+    }
     return success;
 }
 

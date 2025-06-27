@@ -95,7 +95,7 @@ struct lr_stateful_table {
 };
 
 #define LR_STATEFUL_TABLE_FOR_EACH(LR_LB_NAT_REC, TABLE) \
-    HMAP_FOR_EACH (LR_LB_NAT_REC, key_node, &(TABLE)->entries)
+    HMAP_FOR_EACH_SAFE (LR_LB_NAT_REC, key_node, &(TABLE)->entries)
 
 #define LR_STATEFUL_TABLE_FOR_EACH_IN_P(LR_STATEFUL_REC, JOBID, TABLE) \
     HMAP_FOR_EACH_IN_PARALLEL (LR_STATEFUL_REC, key_node, JOBID, \

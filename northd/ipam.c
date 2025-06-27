@@ -9,9 +9,13 @@
 #include "ovn/lex.h"
 
 #include "smap.h"
+#include "northd/ipam.h"
+#include "northd/northd.h"
 #include "packets.h"
 #include "bitmap.h"
 #include "openvswitch/vlog.h"
+#include "lib/ovn-util.h"
+#include "lib/ovn-nb-idl.h"
 
 VLOG_DEFINE_THIS_MODULE(ipam)
 
@@ -41,10 +45,32 @@ init_ipam_info(struct ipam_info *info, const struct smap *config, const char *id
 }
 
 void
+init_ipam_info_for_datapath(struct ovn_datapath *od)
+{
+    if (!od->nbs) {
+        return;
+    }
+
+    char uuid_s[UUID_LEN + 1];
+    sprintf(uuid_s, UUID_FMT, UUID_ARGS(&od->key));
+    init_ipam_info(&od->ipam_info, &od->nbs->other_config, uuid_s);
+}
+
+void
 destroy_ipam_info(struct ipam_info *info)
 {
     bitmap_free(info->allocated_ipv4s);
     free(CONST_CAST(char *, info->id));
+}
+
+void
+ipam_insert_ip_for_datapath(struct ovn_datapath *od, uint32_t ip, bool dynamic)
+{
+    if (!od) {
+        return;
+    }
+    //VLOG_INFO("LUCAS %s %u", __func__, ip);
+    ipam_insert_ip(&od->ipam_info, ip, dynamic);
 }
 
 bool
@@ -63,6 +89,7 @@ ipam_insert_ip(struct ipam_info *info, uint32_t ip, bool dynamic)
                          info->id, IP_ARGS(htonl(ip)));
             return false;
         }
+        //VLOG_INFO("LUCAS %s %u", __func__, ip);
         bitmap_set1(info->allocated_ipv4s,
                     ip - info->start_ipv4);
     }
@@ -118,7 +145,7 @@ ipam_insert_mac(struct eth_addr *ea, bool check)
         || (check && ipam_is_duplicate_mac(ea, mac64, true))) {
         return;
     }
-
+    VLOG_INFO("LUCAS ipam_insert_mac %ld", mac64);
     struct macam_node *new_macam_node = xmalloc(sizeof *new_macam_node);
     new_macam_node->mac_addr = *ea;
     hmap_insert(&macam, &new_macam_node->hmap_node, hash_uint64(mac64));
@@ -139,6 +166,7 @@ ipam_get_unused_mac(ovs_be32 ip)
         if (!ipam_is_duplicate_mac(&mac, mac64, false)) {
             break;
         }
+       // VLOG_INFO("LUCAS ipam_get_unused_mac %lu duplicate", mac64);
     }
 
     if (i == MAC_ADDR_SPACE) {
@@ -153,9 +181,25 @@ ipam_get_unused_mac(ovs_be32 ip)
 void
 cleanup_macam(void)
 {
+    VLOG_INFO("LUCAS %s", __func__);
     struct macam_node *node;
     HMAP_FOR_EACH_POP (node, hmap_node, &macam) {
         free(node);
+    }
+}
+
+void
+remove_mac_from_macam(struct eth_addr *ea) {
+    struct macam_node *macam_node;
+    uint64_t mac64 = eth_addr_to_uint64(*ea);
+    HMAP_FOR_EACH_WITH_HASH (macam_node, hmap_node,  hash_uint64(mac64),
+                             &macam) {
+        if (eth_addr_equals(*ea, macam_node->mac_addr)) {
+            VLOG_INFO("LUCAS remove %lu", mac64);
+            hmap_remove(&macam, &macam_node->hmap_node);
+            free(macam_node);
+            break;
+        }
     }
 }
 
@@ -338,3 +382,57 @@ ipam_is_duplicate_mac(struct eth_addr *ea, uint64_t mac64, bool warn)
     return false;
 }
 
+
+void
+ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
+{
+    if (!od || !op) {
+        return;
+    }
+
+    if (op->n_lsp_non_router_addrs) {
+        /* Add all the port's addresses to address data structures. */
+        for (size_t i = 0; i < op->n_lsp_non_router_addrs; i++) {
+            ipam_insert_lsp_addresses(od, &op->lsp_addrs[i]);
+        }
+    } else if (op->lrp_networks.ea_s[0]) {
+        VLOG_INFO("LUCAS %s ipam_insert_mac", __func__);
+        ipam_insert_mac(&op->lrp_networks.ea, true);
+
+        if (!op->peer || !op->peer->nbsp || !op->peer->od || !op->peer->od->nbs
+            || !smap_get(&op->peer->od->nbs->other_config, "subnet")) {
+            return;
+        }
+
+        for (size_t i = 0; i < op->lrp_networks.n_ipv4_addrs; i++) {
+            uint32_t ip = ntohl(op->lrp_networks.ipv4_addrs[i].addr);
+            /* If the router has the first IP address of the subnet, don't add
+             * it to IPAM. We already added this when we initialized IPAM for
+             * the datapath. This will just result in an erroneous message
+             * about a duplicate IP address.
+             */
+            if (ip != op->peer->od->ipam_info.start_ipv4) {
+                ipam_insert_ip_for_datapath(op->peer->od, ip, false);
+            }
+        }
+    }
+}
+
+void
+ipam_insert_lsp_addresses(struct ovn_datapath *od,
+                          struct lport_addresses *laddrs)
+{
+
+    ipam_insert_mac(&laddrs->ea, true);
+
+    /* IP is only added to IPAM if the switch's subnet option
+     * is set, whereas MAC is always added to MACAM. */
+    if (!od->ipam_info.allocated_ipv4s) {
+        return;
+    }
+
+    for (size_t j = 0; j < laddrs->n_ipv4_addrs; j++) {
+        uint32_t ip = ntohl(laddrs->ipv4_addrs[j].addr);
+        ipam_insert_ip_for_datapath(od, ip, false);
+    }
+}
