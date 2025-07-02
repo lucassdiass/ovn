@@ -4761,6 +4761,7 @@ ls_port_init(struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
 {
     op->od = od;
     parse_lsp_addrs(op);
+
     /* Assign explicitly requested tunnel ids first. */
     if (!ovn_port_assign_requested_tnl_id(op)) {
         return false;
