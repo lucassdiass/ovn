@@ -17764,7 +17764,7 @@ build_lbnat_lflows_iterate_by_lsp(
 {
     ovs_assert(op->nbsp);
 
-    if (!lsp_is_router(op->nbsp) || !op->peer) {
+    if (!lsp_is_router(op->nbsp) || !op->peer || lsp_is_from_ts(op)) {
         return;
     }
 

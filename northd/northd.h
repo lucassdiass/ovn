@@ -1000,6 +1000,15 @@ lsp_is_router(const struct nbrec_logical_switch_port *nbsp)
     return !strcmp(nbsp->type, "router");
 }
 
+static inline bool
+lsp_is_from_ts(const struct ovn_port *op)
+{
+    ovs_assert(op->od);
+    ovs_assert(op->od->nbs);
+    const char *ts = smap_get(&op->od->nbs->other_config, "interconn-ts");
+    return ts ? true : false;
+}
+
 const char *lrp_find_member_ip(const struct ovn_port *op, const char *ip_s);
 
 /* This function returns true if 'op' is a gateway router port.
