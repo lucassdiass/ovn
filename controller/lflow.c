@@ -322,7 +322,8 @@ lflow_parse_actions(const struct sbrec_logical_flow *lflow,
                     const struct lflow_ctx_in *l_ctx_in,
                     struct sset *template_vars_ref,
                     struct ofpbuf *ovnacts_out,
-                    struct expr **prereqs_out)
+                    struct expr **prereqs_out,
+                    bool is_ic_gw)
 {
     bool ingress = !strcmp(lflow->pipeline, "ingress");
     struct ovnact_parse_params pp = {
@@ -350,7 +351,7 @@ lflow_parse_actions(const struct sbrec_logical_flow *lflow,
     }
 
     char *error = ovnacts_parse_string(lex_str_get(&actions_s), &pp,
-                                       ovnacts_out, prereqs_out);
+                                       ovnacts_out, prereqs_out, is_ic_gw);
     lex_str_free(&actions_s);
     if (error) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
@@ -415,8 +416,14 @@ consider_lflow_for_added_as_ips__(
     struct sset template_vars_ref = SSET_INITIALIZER(&template_vars_ref);
     struct expr *prereqs = NULL;
 
+    bool is_ic_gw = false;
+    if (l_ctx_in->chassis) {
+        is_ic_gw = smap_get_bool(&l_ctx_in->chassis->other_config, "is-interconn",
+                                 false);
+    }
+
     if (!lflow_parse_actions(lflow, l_ctx_in, &template_vars_ref,
-                             &ovnacts, &prereqs)) {
+                             &ovnacts, &prereqs, is_ic_gw)) {
         ovnacts_free(ovnacts.data, ovnacts.size);
         ofpbuf_uninit(&ovnacts);
         store_lflow_template_refs(l_ctx_out->lflow_deps_mgr,
@@ -1040,6 +1047,12 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
                         struct lflow_ctx_in *l_ctx_in,
                         struct lflow_ctx_out *l_ctx_out)
 {
+    bool is_ic_gw = false;
+    if (l_ctx_in->chassis) {
+        is_ic_gw = smap_get_bool(&l_ctx_in->chassis->other_config, "is-interconn",
+                                 false);
+    }
+
     struct local_datapath *ldp = get_local_datapath(l_ctx_in->local_datapaths,
                                                     dp->tunnel_key);
     if (!ldp) {
@@ -1090,7 +1103,7 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
     struct expr *prereqs = NULL;
 
     if (!lflow_parse_actions(lflow, l_ctx_in, &template_vars_ref,
-                             &ovnacts, &prereqs)) {
+                             &ovnacts, &prereqs, is_ic_gw)) {
         ovnacts_free(ovnacts.data, ovnacts.size);
         ofpbuf_uninit(&ovnacts);
         store_lflow_template_refs(l_ctx_out->lflow_deps_mgr,

@@ -232,12 +232,12 @@ struct action_context {
     enum expr_write_scope scope;  /* Current writeability scope */
 };
 
-static void parse_actions(struct action_context *, enum lex_type sentinel);
+static void parse_actions(struct action_context *, enum lex_type sentinel, bool is_ic_gw);
 
 static void parse_nested_action(struct action_context *ctx,
                                 enum ovnact_type type,
                                 const char *prereq,
-                                enum expr_write_scope scope);
+                                enum expr_write_scope scope, bool);
 
 static void format_nested_action(const struct ovnact_nest *on,
                                  const char *name,
@@ -769,7 +769,7 @@ parse_CT_COMMIT(struct action_context *ctx)
 {
     if (ctx->lexer->token.type == LEX_T_LCURLY) {
         parse_nested_action(ctx, OVNACT_CT_COMMIT_V2, "ip",
-                            WR_CT_COMMIT);
+                            WR_CT_COMMIT, false);
     } else {
         /* Add an empty nested action to allow for "ct_commit;" syntax */
         add_prerequisite(ctx, "ip");
@@ -1707,7 +1707,8 @@ encode_CT_CLEAR(const struct ovnact_null *null OVS_UNUSED,
  * actions on a packet derived from the one being processed. */
 static void
 parse_nested_action(struct action_context *ctx, enum ovnact_type type,
-                    const char *prereq, enum expr_write_scope scope)
+                    const char *prereq, enum expr_write_scope scope,
+                    bool is_ic_gw)
 {
     if (!lexer_force_match(ctx->lexer, LEX_T_LCURLY)) {
         return;
@@ -1729,7 +1730,7 @@ parse_nested_action(struct action_context *ctx, enum ovnact_type type,
         .depth = ctx->depth + 1,
         .scope = scope,
     };
-    parse_actions(&inner_ctx, LEX_T_RCURLY);
+    parse_actions(&inner_ctx, LEX_T_RCURLY, is_ic_gw);
 
     if (prereq) {
         /* XXX Not really sure what we should do with prerequisites for "arp"
@@ -1758,73 +1759,73 @@ parse_nested_action(struct action_context *ctx, enum ovnact_type type,
 static void
 parse_ARP(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ARP, "ip", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ARP, "ip", ctx->scope, false);
 }
 
 static void
 parse_ICMP4(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ICMP4, "ip4", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ICMP4, "ip4", ctx->scope, false);
 }
 
 static void
 parse_ICMP4_ERROR(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ICMP4_ERROR, "ip4", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ICMP4_ERROR, "ip4", ctx->scope, false);
 }
 
 static void
 parse_ICMP6(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ICMP6, "ip6", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ICMP6, "ip6", ctx->scope, false);
 }
 
 static void
 parse_ICMP6_ERROR(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ICMP6_ERROR, "ip6", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ICMP6_ERROR, "ip6", ctx->scope, false);
 }
 
 static void
 parse_TCP_RESET(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_TCP_RESET, "tcp", ctx->scope);
+    parse_nested_action(ctx, OVNACT_TCP_RESET, "tcp", ctx->scope, false);
 }
 
 static void
 parse_SCTP_ABORT(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_SCTP_ABORT, "sctp", ctx->scope);
+    parse_nested_action(ctx, OVNACT_SCTP_ABORT, "sctp", ctx->scope, false);
 }
 
 static void
 parse_ND_NA(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ND_NA, "nd_ns", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ND_NA, "nd_ns", ctx->scope, false);
 }
 
 static void
 parse_ND_NA_ROUTER(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ND_NA_ROUTER, "nd_ns", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ND_NA_ROUTER, "nd_ns", ctx->scope, false);
 }
 
 static void
 parse_ND_NS(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_ND_NS, "ip", ctx->scope);
+    parse_nested_action(ctx, OVNACT_ND_NS, "ip", ctx->scope, false);
 }
 
 static void
 parse_CLONE(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_CLONE, NULL, WR_DEFAULT);
+    parse_nested_action(ctx, OVNACT_CLONE, NULL, WR_DEFAULT, false);
 }
 
 static void
 parse_REJECT(struct action_context *ctx)
 {
-    parse_nested_action(ctx, OVNACT_REJECT, NULL, ctx->scope);
+    parse_nested_action(ctx, OVNACT_REJECT, NULL, ctx->scope, false);
 }
 
 static void
@@ -5741,7 +5742,7 @@ parse_set_action(struct action_context *ctx)
 }
 
 static bool
-parse_action(struct action_context *ctx)
+parse_action(struct action_context *ctx, bool is_ic_gw)
 {
     if (ctx->lexer->token.type == LEX_T_TEMPLATE) {
         lexer_error(ctx->lexer, "Unexpanded template.");
@@ -5768,19 +5769,31 @@ parse_action(struct action_context *ctx)
     } else if (lexer_match_id(ctx->lexer, "ip.ttl")) {
         parse_DEC_TTL(ctx);
     } else if (lexer_match_id(ctx->lexer, "ct_next")) {
-        parse_CT_NEXT(ctx);
+        if (!is_ic_gw) {
+            parse_CT_NEXT(ctx);
+        }
     } else if (lexer_match_id(ctx->lexer, "ct_commit")) {
         parse_CT_COMMIT(ctx);
     } else if (lexer_match_id(ctx->lexer, "ct_commit_to_zone")) {
-        parse_CT_COMMIT_TO_ZONE(ctx);
+        if (!is_ic_gw) {
+            parse_CT_COMMIT_TO_ZONE(ctx);
+        }
     } else if (lexer_match_id(ctx->lexer, "ct_dnat")) {
-        parse_CT_DNAT(ctx);
+        if (!is_ic_gw) {
+            parse_CT_DNAT(ctx);
+        }
     } else if (lexer_match_id(ctx->lexer, "ct_snat")) {
-        parse_CT_SNAT(ctx);
+        if (!is_ic_gw) {
+            parse_CT_SNAT(ctx);
+        }
     } else if (lexer_match_id(ctx->lexer, "ct_dnat_in_czone")) {
-        parse_CT_DNAT_IN_CZONE(ctx);
+        if (!is_ic_gw) {
+            parse_CT_DNAT_IN_CZONE(ctx);
+        }
     } else if (lexer_match_id(ctx->lexer, "ct_snat_in_czone")) {
-        parse_CT_SNAT_IN_CZONE(ctx);
+        if (!is_ic_gw) {
+            parse_CT_SNAT_IN_CZONE(ctx);
+        }
     } else if (lexer_match_id(ctx->lexer, "ct_lb")) {
         parse_ct_lb_action(ctx, false);
     } else if (lexer_match_id(ctx->lexer, "ct_lb_mark")) {
@@ -5865,7 +5878,7 @@ parse_action(struct action_context *ctx)
 }
 
 static void
-parse_actions(struct action_context *ctx, enum lex_type sentinel)
+parse_actions(struct action_context *ctx, enum lex_type sentinel, bool is_ic_gw)
 {
     /* "drop;" by itself is a valid (empty) set of actions, but it can't be
      * combined with other actions because that doesn't make sense. */
@@ -5879,7 +5892,7 @@ parse_actions(struct action_context *ctx, enum lex_type sentinel)
     }
 
     while (!lexer_match(ctx->lexer, sentinel)) {
-        if (!parse_action(ctx)) {
+        if (!parse_action(ctx, is_ic_gw)) {
             return;
         }
     }
@@ -5902,7 +5915,7 @@ parse_actions(struct action_context *ctx, enum lex_type sentinel)
  */
 bool
 ovnacts_parse(struct lexer *lexer, const struct ovnact_parse_params *pp,
-              struct ofpbuf *ovnacts, struct expr **prereqsp)
+              struct ofpbuf *ovnacts, struct expr **prereqsp, bool is_ic_gw)
 {
     size_t ovnacts_start = ovnacts->size;
 
@@ -5914,7 +5927,7 @@ ovnacts_parse(struct lexer *lexer, const struct ovnact_parse_params *pp,
         .scope = WR_DEFAULT,
     };
     if (!lexer->error) {
-        parse_actions(&ctx, LEX_T_END);
+        parse_actions(&ctx, LEX_T_END, is_ic_gw);
     }
 
     if (!lexer->error) {
@@ -5935,13 +5948,13 @@ ovnacts_parse(struct lexer *lexer, const struct ovnact_parse_params *pp,
 /* Like ovnacts_parse(), but the actions are taken from 's'. */
 char * OVS_WARN_UNUSED_RESULT
 ovnacts_parse_string(const char *s, const struct ovnact_parse_params *pp,
-                     struct ofpbuf *ofpacts, struct expr **prereqsp)
+                     struct ofpbuf *ofpacts, struct expr **prereqsp, bool is_ic_gw)
 {
     struct lexer lexer;
 
     lexer_init(&lexer, s);
     lexer_get(&lexer);
-    ovnacts_parse(&lexer, pp, ofpacts, prereqsp);
+    ovnacts_parse(&lexer, pp, ofpacts, prereqsp, is_ic_gw);
     char *error = lexer_steal_error(&lexer);
     lexer_destroy(&lexer);
 

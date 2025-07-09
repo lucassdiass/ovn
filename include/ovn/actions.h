@@ -876,9 +876,9 @@ struct ovnact_parse_params {
 };
 
 bool ovnacts_parse(struct lexer *, const struct ovnact_parse_params *,
-                    struct ofpbuf *ovnacts, struct expr **prereqsp);
+                    struct ofpbuf *ovnacts, struct expr **prereqsp, bool);
 char *ovnacts_parse_string(const char *s, const struct ovnact_parse_params *,
-                           struct ofpbuf *ovnacts, struct expr **prereqsp)
+                           struct ofpbuf *ovnacts, struct expr **prereqsp, bool)
     OVS_WARN_UNUSED_RESULT;
 
 void ovnacts_format(const struct ovnact[], size_t ovnacts_len, struct ds *);

@@ -1348,7 +1348,7 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
         };
 
         error = ovnacts_parse_string(lex_str_get(&exp_input), &pp, &ovnacts,
-                                     &prereqs);
+                                     &prereqs, false);
         if (!error) {
             /* Convert the parsed representation back to a string and print it,
              * if it's different from the input. */
@@ -1420,7 +1420,7 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
             struct expr *prereqs2;
             ofpbuf_init(&ovnacts2, 0);
             error = ovnacts_parse_string(ds_cstr(&ovnacts_s), &pp, &ovnacts2,
-                                         &prereqs2);
+                                         &prereqs2, false);
             if (!error) {
                 struct ds ovnacts2_s = DS_EMPTY_INITIALIZER;
                 ovnacts_format(ovnacts2.data, ovnacts2.size, &ovnacts2_s);

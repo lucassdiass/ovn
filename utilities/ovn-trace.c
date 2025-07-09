@@ -1029,7 +1029,7 @@ parse_lflow_for_datapath(const struct sbrec_logical_flow *sblf,
             return;
         }
         error = ovnacts_parse_string(lex_str_get(&actions_s), &pp, &ovnacts,
-                                     &prereqs);
+                                     &prereqs, false);
         lex_str_free(&actions_s);
         if (error) {
             VLOG_WARN("%s: parsing actions failed (%s)", sblf->actions, error);
