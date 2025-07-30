@@ -12394,15 +12394,15 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
      * the previous conntrack entry that is in the SYN_SENT state
      * (created by ct_lb_mark for the first rcv packet in this flow).
      */
-    if (stateless_nat) {
-        if (!vector_is_empty(&ctx->lb_vip->backends)) {
-            const struct ovn_lb_backend *backend =
-                vector_get_ptr(&ctx->lb_vip->backends, 0);
+    if (stateless_nat && !vector_is_empty(&ctx->lb_vip->backends)) {
+        const struct ovn_lb_backend *backend;
+        VECTOR_FOR_EACH_PTR (&ctx->lb_vip->backends, backend) {
             bool ipv6 = !IN6_IS_ADDR_V4MAPPED(&backend->ip);
             ds_put_format(&dnat_action, "%s.dst = %s; ", ipv6 ? "ip6" : "ip4",
                           backend->ip_str);
         }
     }
+
     ds_put_format(&dnat_action, "%s", ctx->new_action[type]);
 
     const char *meter = NULL;
