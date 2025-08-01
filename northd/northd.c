@@ -11955,11 +11955,12 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
                                      bool stateless_nat)
 {
     struct ds dnat_action = DS_EMPTY_INITIALIZER;
+    struct ds fin_ack_match = DS_EMPTY_INITIALIZER;
+    struct ds fin_ack_action = DS_EMPTY_INITIALIZER;
 
     /* Store the match lengths, so we can reuse the ds buffer. */
     size_t new_match_len = ctx->new_match->length;
     size_t undnat_match_len = ctx->undnat_match->length;
-
     /* (NOTE) dnat_action: Add the first LB backend IP as a destination
      * action of the lr_in_dnat NAT rule. Including the backend IP is useful
      * for accepting packets coming from a chassis that does not have
@@ -11985,6 +11986,20 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
             ds_put_format(&dnat_action, "%s.dst = %s; ", ipv6 ? "ip6" : "ip4",
                           backend->ip_str);
         }
+        bool ipv4 = ctx->lb_vip->address_family == AF_INET;
+        const char *ip_match = ipv4 ? "ip4" : "ip6";
+        ds_put_format(&fin_ack_match, "ct.inv && %s && %s.dst == %s",
+                      ip_match, ip_match, ctx->lb_vip->vip_str);
+        ds_put_format(&fin_ack_action, "output; ");
+        //ds_put_format(&fin_ack_action, "%s.dst = ct_nw_dst();", ip_match);
+        if (ctx->lb_vip->port_str) {
+            ds_put_format(&fin_ack_match,
+                          " && "REG_CT_PROTO" == %s && "REG_CT_TP_DST" == %s",
+                          get_protocol_number_str(ctx->lb->proto),
+                          ctx->lb_vip->port_str);
+          //ds_put_format(&fin_ack_action, "%s.dst = ct_nw_dst();", ip_match);
+
+        }
     }
     ds_put_format(&dnat_action, "%s", ctx->new_action[type]);
 
@@ -11996,6 +12011,10 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
 
     if (!vector_is_empty(&ctx->lb_vip->backends) ||
         !ctx->lb_vip->empty_backend_rej) {
+        if (stateless_nat) {
+            ds_put_format(&fin_ack_match, " && is_chassis_resident(%s)",
+                  dgp->cr_port->json_key);
+        }
         ds_put_format(ctx->new_match, " && is_chassis_resident(%s)",
                       dgp->cr_port->json_key);
     }
@@ -12004,10 +12023,19 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
                               ds_cstr(ctx->new_match), ds_cstr(&dnat_action),
                               NULL, meter, &ctx->lb->nlb->header_,
                               lflow_ref);
+    if (stateless_nat) {
+         ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
+                                              ds_cstr(&fin_ack_match), ds_cstr(&fin_ack_action),
+                                              NULL, meter, &ctx->lb->nlb->header_,
+                                              lflow_ref);
+    }
 
     ds_truncate(ctx->new_match, new_match_len);
 
     ds_destroy(&dnat_action);
+    ds_destroy(&fin_ack_match);
+    ds_destroy(&fin_ack_action);
+
     if (vector_is_empty(&ctx->lb_vip->backends)) {
         return;
     }
