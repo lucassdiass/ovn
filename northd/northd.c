@@ -11246,36 +11246,13 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
                                      bool stateless_nat)
 {
     struct ds dnat_action = DS_EMPTY_INITIALIZER;
+    struct ds new_action_stateless_nat = DS_EMPTY_INITIALIZER;
+    struct ds new_match_stateless_nat = DS_EMPTY_INITIALIZER;
 
     /* Store the match lengths, so we can reuse the ds buffer. */
     size_t new_match_len = ctx->new_match->length;
     size_t undnat_match_len = ctx->undnat_match->length;
 
-    /* (NOTE) dnat_action: Add the first LB backend IP as a destination
-     * action of the lr_in_dnat NAT rule. Including the backend IP is useful
-     * for accepting packets coming from a chassis that does not have
-     * previously established conntrack entries. This means that the actions
-     * (ip4.dst + ct_lb_mark) are executed in addition and ip4.dst is not
-     * useful when traffic passes through the same chassis for ingress/egress
-     * packets. However, the actions are complementary in cases where traffic
-     * enters from one chassis, the ack response comes from another chassis,
-     * and the final ack step of the TCP handshake comes from the first
-     * chassis used. Without using stateless NAT, the connection will not be
-     * established because the return packet followed a path through another
-     * chassis and only ct_lb_mark will not be able to receive the ack and
-     * forward it to the right backend. With using stateless NAT, the packet
-     * will be accepted and forwarded to the same backend that corresponds to
-     * the previous conntrack entry that is in the SYN_SENT state
-     * (created by ct_lb_mark for the first rcv packet in this flow).
-     */
-    if (stateless_nat) {
-        if (ctx->lb_vip->n_backends) {
-            struct ovn_lb_backend *backend = &ctx->lb_vip->backends[0];
-            bool ipv6 = !IN6_IS_ADDR_V4MAPPED(&backend->ip);
-            ds_put_format(&dnat_action, "%s.dst = %s; ", ipv6 ? "ip6" : "ip4",
-                          backend->ip_str);
-        }
-    }
     ds_put_format(&dnat_action, "%s", ctx->new_action[type]);
 
     const char *meter = NULL;
@@ -11285,18 +11262,53 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
     }
 
     if (ctx->lb_vip->n_backends || !ctx->lb_vip->empty_backend_rej) {
+        ds_put_format(&new_match_stateless_nat, "is_chassis_resident(%s)",
+                      dgp->cr_port->json_key);
         ds_put_format(ctx->new_match, " && is_chassis_resident(%s)",
                       dgp->cr_port->json_key);
     }
 
-    ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
-                              ds_cstr(ctx->new_match), ds_cstr(&dnat_action),
-                              NULL, meter, &ctx->lb->nlb->header_,
-                              lflow_ref);
-
+    if (stateless_nat) {
+        bool ipv4 = ctx->lb_vip->address_family == AF_INET;
+        const char *ip_match = ipv4 ? "ip4" : "ip6";
+        ds_put_format(&new_match_stateless_nat, " && %s && %s.dst == %s ", ip_match, ip_match,
+                       ctx->lb_vip->vip_str);
+        if (ctx->lb_vip->port_str) {
+            ds_put_format(&new_match_stateless_nat,
+                          " && %s && %s.dst == %s",
+                          ctx->lb->proto, ctx->lb->proto,
+                          ctx->lb_vip->port_str);
+        }
+        size_t match_len = new_match_stateless_nat.length;
+        size_t i;
+        const struct ovn_lb_backend *backend;
+        for (i = 0; i < ctx->lb_vip->n_backends; i++) {
+            backend = &ctx->lb_vip->backends[i];
+            ds_put_format(&new_match_stateless_nat, " && reg1[0..15] == %lu", i);
+            ds_put_format(&new_action_stateless_nat, "%s.dst = %s; ", ip_match, backend->ip_str);
+            if (ctx->lb_vip->port_str) {
+                ds_put_format(&new_action_stateless_nat, "%s.dst = %s; ", ctx->lb->proto, backend->port_str);
+            }
+            ds_put_format(&new_action_stateless_nat, "next;");
+            ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
+                                      ds_cstr(&new_match_stateless_nat), ds_cstr(&new_action_stateless_nat),
+                                      NULL, meter, &ctx->lb->nlb->header_,
+                                      lflow_ref);
+            ds_clear(&new_action_stateless_nat);
+            ds_truncate(&new_match_stateless_nat, match_len);
+        }
+    } else {
+        ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
+                                  ds_cstr(ctx->new_match), ds_cstr(&dnat_action),
+                                  NULL, meter, &ctx->lb->nlb->header_,
+                                  lflow_ref);
+    }
     ds_truncate(ctx->new_match, new_match_len);
 
     ds_destroy(&dnat_action);
+    ds_destroy(&new_match_stateless_nat);
+    ds_destroy(&new_action_stateless_nat);
+
     if (!ctx->lb_vip->n_backends) {
         return;
     }
@@ -11692,7 +11704,9 @@ build_lrouter_defrag_flows_for_lb(struct ovn_lb_datapaths *lb_dps,
     if (!lb_dps->n_nb_lr) {
         return;
     }
-
+    struct ds action = DS_EMPTY_INITIALIZER;
+    bool use_stateless_nat = smap_get_bool(&lb_dps->lb->nlb->options,
+                                           "use_stateless_nat", false);
     for (size_t i = 0; i < lb_dps->lb->n_vips; i++) {
         struct ovn_lb_vip *lb_vip = &lb_dps->lb->vips[i];
         bool ipv6 = lb_vip->address_family == AF_INET6;
@@ -11701,12 +11715,30 @@ build_lrouter_defrag_flows_for_lb(struct ovn_lb_datapaths *lb_dps,
         ds_clear(match);
         ds_put_format(match, "ip && ip%c.dst == %s", ipv6 ? '6' : '4',
                       lb_vip->vip_str);
-
+        if (use_stateless_nat && !vector_is_empty(&lb_vip->backends)) {
+            ds_put_format(&action, "reg1[0..15] = select(values=(");
+            size_t idx_backend = 0;
+            const struct ovn_lb_backend *backend;
+            VECTOR_FOR_EACH_PTR (&lb_vip->backends, backend) {
+                ds_put_format(&action, "%lu,", idx_backend++);
+            }
+            ds_truncate(&action, action.length - 1);
+            ds_put_format(&action, ");");
+            if (lb_dps->lb->selection_fields) {
+                 ds_put_format(&action, "hash_fields=\"%s\"",
+                                lb_dps->lb->selection_fields);
+            }
+            ds_put_format(&action,"); next;");
+        } else {
+            ds_put_format(&action, "ct_dnat;");
+        }
         ovn_lflow_add_with_dp_group(
             lflows, lb_dps->nb_lr_map, ods_size(lr_datapaths),
-            S_ROUTER_IN_DEFRAG, prio, ds_cstr(match), "ct_dnat;",
+            S_ROUTER_IN_DEFRAG, prio, ds_cstr(match), ds_cstr(&action),
             &lb_dps->lb->nlb->header_, lb_dps->lflow_ref);
+        ds_clear(&action);
     }
+    ds_destroy(&action);
 }
 
 static void
