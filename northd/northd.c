@@ -11941,11 +11941,25 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
                                      bool stateless_nat)
 {
     struct ds dnat_action = DS_EMPTY_INITIALIZER;
+    struct ds match_stateless_nat = DS_EMPTY_INITIALIZER;
 
     /* Store the match lengths, so we can reuse the ds buffer. */
     size_t new_match_len = ctx->new_match->length;
     size_t undnat_match_len = ctx->undnat_match->length;
 
+    if (stateless_nat) {
+        bool ipv4 = ctx->lb_vip->address_family == AF_INET;
+        const char *ip_match = ipv4 ? "ip4" : "ip6";
+        ds_put_format(&match_stateless_nat, "((ct.new && !ct.rel) || ct.inv)"
+                      " && %s && %s.dst == %s", ip_match, ip_match,
+                      ctx->lb_vip->vip_str);
+        if (ctx->lb_vip->port_str) {
+            ds_put_format(&match_stateless_nat,
+                          " && "REG_CT_PROTO" == %s && "REG_CT_TP_DST" == %s",
+                          get_protocol_number_str(ctx->lb->proto),
+                          ctx->lb_vip->port_str);
+        }
+    }
     ds_put_format(&dnat_action, "%s", ctx->new_action[type]);
 
     const char *meter = NULL;
@@ -11958,16 +11972,26 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
         !ctx->lb_vip->empty_backend_rej) {
         ds_put_format(ctx->new_match, " && is_chassis_resident(%s)",
                       dgp->cr_port->json_key);
+        if (stateless_nat) {
+            ds_put_format(&match_stateless_nat," && is_chassis_resident(%s)",
+                          dgp->cr_port->json_key);
+        }
     }
 
-    ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
-                              ds_cstr(ctx->new_match), ds_cstr(&dnat_action),
-                              NULL, meter, &ctx->lb->nlb->header_,
-                              lflow_ref);
-
+    if (stateless_nat) {
+        ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
+                                  ds_cstr(&match_stateless_nat), ds_cstr(&dnat_action),
+                                  NULL, meter, &ctx->lb->nlb->header_,
+                                  lflow_ref);
+    } else {
+        ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
+                                  ds_cstr(ctx->new_match), ds_cstr(&dnat_action),
+                                  NULL, meter, &ctx->lb->nlb->header_,
+                                  lflow_ref);
+    }
     ds_truncate(ctx->new_match, new_match_len);
-
     ds_destroy(&dnat_action);
+    ds_destroy(&match_stateless_nat);
     if (vector_is_empty(&ctx->lb_vip->backends)) {
         return;
     }
