@@ -11986,20 +11986,6 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
             ds_put_format(&dnat_action, "%s.dst = %s; ", ipv6 ? "ip6" : "ip4",
                           backend->ip_str);
         }
-        bool ipv4 = ctx->lb_vip->address_family == AF_INET;
-        const char *ip_match = ipv4 ? "ip4" : "ip6";
-        ds_put_format(&fin_ack_match, "ct.inv && %s && %s.dst == %s",
-                      ip_match, ip_match, ctx->lb_vip->vip_str);
-        ds_put_format(&fin_ack_action, "output; ");
-        //ds_put_format(&fin_ack_action, "%s.dst = ct_nw_dst();", ip_match);
-        if (ctx->lb_vip->port_str) {
-            ds_put_format(&fin_ack_match,
-                          " && "REG_CT_PROTO" == %s && "REG_CT_TP_DST" == %s",
-                          get_protocol_number_str(ctx->lb->proto),
-                          ctx->lb_vip->port_str);
-          //ds_put_format(&fin_ack_action, "%s.dst = ct_nw_dst();", ip_match);
-
-        }
     }
     ds_put_format(&dnat_action, "%s", ctx->new_action[type]);
 
@@ -12023,13 +12009,35 @@ build_distr_lrouter_nat_flows_for_lb(struct lrouter_nat_lb_flows_ctx *ctx,
                               ds_cstr(ctx->new_match), ds_cstr(&dnat_action),
                               NULL, meter, &ctx->lb->nlb->header_,
                               lflow_ref);
-    if (stateless_nat) {
-         ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
-                                              ds_cstr(&fin_ack_match), ds_cstr(&fin_ack_action),
-                                              NULL, meter, &ctx->lb->nlb->header_,
-                                              lflow_ref);
-    }
 
+    if (stateless_nat) {
+        bool ipv4 = ctx->lb_vip->address_family == AF_INET;
+        const char *ip_match = ipv4 ? "ip4" : "ip6";
+        ds_put_format(&fin_ack_match, "ct.inv && %s && %s.dst == %s",
+                      ip_match, ip_match, ctx->lb_vip->vip_str);
+
+        if (ctx->lb_vip->port_str) {
+            ds_put_format(&fin_ack_match,
+                          " && %s && %s.dst == %s",
+                          ctx->lb->proto, ctx->lb->proto,
+                          ctx->lb_vip->port_str);
+        }
+        size_t fin_ack_match_len = fin_ack_match.length;
+        size_t i = 0;
+        const struct ovn_lb_backend *backend;
+        VECTOR_FOR_EACH_PTR (&ctx->lb_vip->backends, backend) {
+            ds_put_format(&fin_ack_match, " && reg0 == %lu", i++);
+            bool ipv6 = !IN6_IS_ADDR_V4MAPPED(&backend->ip);
+            ds_put_format(&fin_ack_action, "%s.dst = %s; ", ipv6 ? "ip6" : "ip4",
+                          backend->ip_str);
+            ovn_lflow_add_with_hint__(ctx->lflows, od, S_ROUTER_IN_DNAT, ctx->prio,
+                                      ds_cstr(&fin_ack_match), ds_cstr(&fin_ack_action),
+                                      NULL, meter, &ctx->lb->nlb->header_,
+                                      lflow_ref);
+            ds_clear(&fin_ack_action);
+            ds_truncate(&fin_ack_match, fin_ack_match_len);
+        }
+    }
     ds_truncate(ctx->new_match, new_match_len);
 
     ds_destroy(&dnat_action);
@@ -12429,7 +12437,11 @@ build_lrouter_defrag_flows_for_lb(struct ovn_lb_datapaths *lb_dps,
     if (!lb_dps->n_nb_lr) {
         return;
     }
-
+    struct ds action = DS_EMPTY_INITIALIZER;
+    bool use_stateless_nat = smap_get_bool(&lb_dps->lb->nlb->options,
+                                           "use_stateless_nat", false);
+    ds_put_format(&action, "ct_dnat;");
+    size_t action_len = action.length;
     for (size_t i = 0; i < lb_dps->lb->n_vips; i++) {
         struct ovn_lb_vip *lb_vip = &lb_dps->lb->vips[i];
         bool ipv6 = lb_vip->address_family == AF_INET6;
@@ -12438,12 +12450,20 @@ build_lrouter_defrag_flows_for_lb(struct ovn_lb_datapaths *lb_dps,
         ds_clear(match);
         ds_put_format(match, "ip && ip%c.dst == %s", ipv6 ? '6' : '4',
                       lb_vip->vip_str);
-
+        if (use_stateless_nat) {
+            const char ip_type =  ipv6 ? '6' : '4';
+            ds_put_format(&action, "reg0 = load:hash(ip%c.src, ip%c.dst,"
+                           "%s.src, %s.dst) %% %lu;",
+                           ip_type, ip_type, lb_dps->lb->proto,
+                           lb_dps->lb->proto, lb_vip->backends.len);
+        }
         ovn_lflow_add_with_dp_group(
             lflows, lb_dps->nb_lr_map, ods_size(lr_datapaths),
-            S_ROUTER_IN_DEFRAG, prio, ds_cstr(match), "ct_dnat;",
+            S_ROUTER_IN_DEFRAG, prio, ds_cstr(match), ds_cstr(&action),
             &lb_dps->lb->nlb->header_, lb_dps->lflow_ref);
+        ds_truncate(&action, action_len);
     }
+    ds_destroy(&action);
 }
 
 static void
