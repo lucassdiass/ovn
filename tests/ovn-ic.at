@@ -3526,6 +3526,89 @@ OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
 192.168.0.0/24 169.254.101.22
 ])
 
+ovn_as az2
+check ovn-nbctl --wait=sb set Logical_Router lr12 option:dynamic-routing=true \
+    option:dynamic-routing-redistribute="connected,static"
+check ovn_as az2 ovn-nbctl --wait=sb lrp-add lr12 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
+sw0=$(fetch_column port_binding _uuid logical_port=lr0-sw0)
+datapath=$(fetch_column datapath_binding _uuid external_ids:name=lr12)
+
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath                    \
+    logical_port=$sw0                     \
+    ip_prefix=192.168.1.0/24              \
+    nexthop=10.0.0.20
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+192.168.1.0/24 169.254.101.22
+])
+
+ovn_as az2
+learned=$(fetch_column Learned_Route _uuid ip_prefix=192.168.1.0/24)
+check ovn-sbctl destroy Learned_Route $learned
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+])
+
+ovn_as az2
+check_uuid ovn-sbctl create Learned_Route \
+               datapath=$datapath                    \
+               logical_port=$sw0                     \
+               ip_prefix=192.168.1.0/24              \
+               nexthop=10.0.0.20
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+192.168.1.0/24 169.254.101.22
+])
+
+ovn_as az2
+# Duplicate route
+check ovn-nbctl --wait=sb lrp-add lr12 lr0-sw1 00:00:00:00:ff:02 169.254.254.1/24
+sw1_lr12=$(fetch_column port_binding _uuid logical_port=lr0-sw1)
+
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath                    \
+    logical_port=$sw1_lr12                \
+    ip_prefix=192.168.1.0/24              \
+    nexthop=169.254.254.3
+
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+192.168.1.0/24 169.254.101.22
+])
+
+# Insert the same route Learned Route in the lr11 and don't learn.
+ovn_as az2
+learned=$(fetch_column Learned_Route _uuid nexthop=10.0.0.20)
+check ovn-sbctl destroy Learned_Route $learned
+
+ovn_as az1
+datapath_lr11=$(fetch_column datapath_binding _uuid external_ids:name=lr11)
+check ovn-nbctl --wait=sb lrp-add lr11 lr11-sw1 00:00:00:00:ff:03 169.254.254.2/24
+sw1_lr11=$(fetch_column port_binding _uuid logical_port=lr11-sw1)
+check_uuid ovn-sbctl create Learned_Route \
+    datapath=$datapath_lr11                    \
+    logical_port=$sw1_lr11                \
+    ip_prefix=192.168.1.0/24              \
+    nexthop=169.254.254.3
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az1 ovn-nbctl lr-route-list lr11 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.22
+])
+
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+])
+
 OVN_CLEANUP_IC([az1], [az2])
 
 AT_CLEANUP
