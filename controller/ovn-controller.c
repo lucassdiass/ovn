@@ -5191,6 +5191,7 @@ en_route_cleanup(void *data)
 static enum engine_input_handler_result
 route_runtime_data_handler(struct engine_node *node, void *data)
 {
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
     struct ed_type_route *re_data = data;
     struct ed_type_runtime_data *rt_data =
         engine_get_input_data("runtime_data", node);
@@ -5229,16 +5230,18 @@ route_runtime_data_handler(struct engine_node *node, void *data)
     HMAP_FOR_EACH (t_dp, node, &rt_data->tracked_dp_bindings) {
         struct tracked_datapath *re_t_dp =
             tracked_datapath_find(&re_data->tracked_route_datapaths, t_dp->dp);
-
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         if (re_t_dp) {
             /* XXX: Until we get I-P support for route exchange we need to
              * request recompute. */
             return EN_UNHANDLED;
         }
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
         struct shash_node *shash_node;
         SHASH_FOR_EACH (shash_node, &t_dp->lports) {
             struct tracked_lport *lport = shash_node->data;
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
             if (route_exchange_find_port(sbrec_port_binding_by_name, chassis,
                                          lport->pb)) {
@@ -5253,6 +5256,7 @@ route_runtime_data_handler(struct engine_node *node, void *data)
                 lport->tracked_type == TRACKED_RESOURCE_REMOVED
                 ? &re_data->tracked_ports_local
                 : &re_data->tracked_ports_remote;
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
             const char *name = lport->pb->logical_port;
             if (sset_contains(tracked_ports, name)) {
@@ -5260,6 +5264,7 @@ route_runtime_data_handler(struct engine_node *node, void *data)
                  * request recompute. */
                 return EN_UNHANDLED;
             }
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
             const char *dp_name = smap_get(&lport->pb->options,
                                            "distributed-port");
@@ -5270,6 +5275,7 @@ route_runtime_data_handler(struct engine_node *node, void *data)
             }
         }
     }
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
     return EN_HANDLED_UNCHANGED;
 }
