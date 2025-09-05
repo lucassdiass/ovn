@@ -185,6 +185,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
             route_e = route_lookup(&sync_routes, datapath,
                                    logical_port, ip_prefix, nexthop);
             if (route_e) {
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 hmap_remove(&sync_routes, &route_e->hmap_node);
                 free(route_e);
             } else {
@@ -192,6 +193,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
                     *sb_changes_pending = true;
                     continue;
                 }
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 sb_route = sbrec_learned_route_insert(ovnsb_idl_txn);
                 sbrec_learned_route_set_datapath(sb_route, datapath);
                 sbrec_learned_route_set_logical_port(sb_route, logical_port);
@@ -204,6 +206,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
     }
 
     HMAP_FOR_EACH_POP (route_e, hmap_node, &sync_routes) {
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         sbrec_learned_route_delete(route_e->sb_route);
         free(route_e);
     }

@@ -26,7 +26,7 @@
 #include "lib/stopwatch-names.h"
 #include "openvswitch/hmap.h"
 #include "ovn-util.h"
-
+#include "openvswitch/vlog.h"
 struct ar_entry {
     struct hmap_node hmap_node;
 
@@ -789,6 +789,7 @@ advertised_route_table_sync(
                                 sb_route->logical_port, sb_route->ip_prefix,
                                 sb_route->tracked_port);
         if (!route_e) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             sbrec_advertised_route_delete(sb_route);
             continue;
         }
@@ -804,6 +805,7 @@ advertised_route_table_sync(
     HMAP_FOR_EACH_POP (route_e, hmap_node, &sync_routes) {
         const struct sbrec_advertised_route *sr =
             sbrec_advertised_route_insert(ovnsb_txn);
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         sbrec_advertised_route_set_datapath(sr, route_e->od->sdp->sb_dp);
         sbrec_advertised_route_set_logical_port(sr, route_e->op->sb);
         sbrec_advertised_route_set_ip_prefix(sr, route_e->ip_prefix);

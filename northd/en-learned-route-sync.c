@@ -221,6 +221,7 @@ routes_table_sync(
     SBREC_LEARNED_ROUTE_TABLE_FOR_EACH_SAFE (sb_route,
                                              sbrec_learned_route_table) {
         if (!ovn_port_find(lr_ports, sb_route->logical_port->logical_port)) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             sbrec_learned_route_delete(sb_route);
             continue;
         }
