@@ -5148,11 +5148,13 @@ en_route_run(struct engine_node *node, void *data)
         .tracked_ports_remote = &re_data->tracked_ports_remote,
         .announce_routes = &re_data->announce_routes,
     };
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
     route_cleanup(&re_data->announce_routes);
     tracked_datapaths_clear(r_ctx_out.tracked_re_datapaths);
     sset_clear(r_ctx_out.tracked_ports_local);
     sset_clear(r_ctx_out.tracked_ports_remote);
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
 
     route_run(&r_ctx_in, &r_ctx_out);
     return EN_UPDATED;
@@ -5473,9 +5475,12 @@ en_route_table_notify_run(struct engine_node *node OVS_UNUSED, void *data)
 {
     struct ed_type_route_table_notify *rtn = data;
     enum engine_node_state state;
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
     if (rtn->changed) {
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         state = EN_UPDATED;
     } else {
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         state = EN_UNCHANGED;
     }
     rtn->changed = false;
@@ -5513,10 +5518,12 @@ en_route_exchange_status_run(struct engine_node *node OVS_UNUSED, void *data)
 {
     struct ed_type_route_exchange_status *res = data;
     enum engine_node_state state;
-
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
     if (res->netlink_trigger_run) {
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         state = EN_UPDATED;
     } else {
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         state = EN_UNCHANGED;
     }
     res->netlink_trigger_run = false;
