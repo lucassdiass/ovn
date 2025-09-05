@@ -27,6 +27,8 @@
 #include "openvswitch/hmap.h"
 #include "ovn-util.h"
 #include "openvswitch/vlog.h"
+VLOG_DEFINE_THIS_MODULE(en_advertised_route_sync);
+
 struct ar_entry {
     struct hmap_node hmap_node;
 

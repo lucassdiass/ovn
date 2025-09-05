@@ -169,6 +169,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
 
         struct smap_node *port_node;
         SMAP_FOR_EACH (port_node, bound_ports) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             /* The user specified an ifname, but we learned it on a different
              * port. */
             if (port_node->value && strcmp(port_node->value,
@@ -176,6 +177,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
                 continue;
             }
 
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             const struct sbrec_port_binding *logical_port =
                 lport_lookup_by_name(sbrec_port_binding_by_name,
                                      port_node->key);
