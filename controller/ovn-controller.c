@@ -5104,6 +5104,7 @@ static enum engine_node_state
 en_route_run(struct engine_node *node, void *data)
 {
     struct ed_type_route *re_data = data;
+    VLOG_INFO("LUCAS %s %d %u", __func__, __LINE__, hmap_count(&re_data->announce_routes));
 
     const struct ovsrec_open_vswitch_table *ovs_table =
         EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
@@ -5412,6 +5413,7 @@ en_route_exchange_run(struct engine_node *node, void *data)
 
     struct ed_type_route *route_data =
         engine_get_input_data("route", node);
+    VLOG_INFO("LUCAS %s %d %u", __func__, __LINE__, hmap_count(&route_data->announce_routes));
 
     /* There can not actually be any routes to advertise unless we also have
      * the Learned_Route table, since they where introduced in the same
@@ -5431,6 +5433,7 @@ en_route_exchange_run(struct engine_node *node, void *data)
     };
 
     hmap_init(&r_ctx_out.route_table_watches);
+    VLOG_INFO("LUCAS %s %d %u", __func__, __LINE__, hmap_count(&r_ctx_in.announce_routes));
 
     route_exchange_run(&r_ctx_in, &r_ctx_out);
     route_table_notify_update_watches(&r_ctx_out.route_table_watches);

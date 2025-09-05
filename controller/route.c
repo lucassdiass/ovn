@@ -157,6 +157,7 @@ route_run(struct route_ctx_in *r_ctx_in,
     build_port_mapping(&port_mapping, r_ctx_in->dynamic_routing_port_mapping);
 
     HMAP_FOR_EACH (ld, hmap_node, r_ctx_in->local_datapaths) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         if (vector_is_empty(&ld->peer_ports) || ld->is_switch) {
             continue;
         }
@@ -171,6 +172,8 @@ route_run(struct route_ctx_in *r_ctx_in,
                 route_exchange_find_port(r_ctx_in->sbrec_port_binding_by_name,
                                          r_ctx_in->chassis,
                                          local_peer);
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+
             if (!repb) {
                 continue;
             }
@@ -227,6 +230,7 @@ route_run(struct route_ctx_in *r_ctx_in,
         if (ad) {
             tracked_datapath_add(ld->datapath, TRACKED_RESOURCE_NEW,
                                  r_ctx_out->tracked_re_datapaths);
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             hmap_insert(r_ctx_out->announce_routes, &ad->node,
                         ad->db->tunnel_key);
         }
@@ -280,6 +284,7 @@ route_run(struct route_ctx_in *r_ctx_in,
         ar->priority = priority;
         hmap_insert(&ad->routes, &ar->node,
                     advertise_route_hash(&prefix, plen));
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
     }
 
     smap_destroy(&port_mapping);
