@@ -215,14 +215,17 @@ handle_route_msg(const struct route_table_msg *msg, void *data)
     /* This route is not from us, so we learn it. */
     if (rd->rtm_protocol != RTPROT_OVN) {
         if (!handle_data->learned_routes) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             return;
         }
         if (prefix_is_link_local(&rd->rta_dst, rd->rtm_dst_len)) {
+            VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
             return;
         }
         struct route_data_nexthop *nexthop;
         LIST_FOR_EACH (nexthop, nexthop_node, &rd->nexthops) {
             if (ipv6_is_zero(&nexthop->addr)) {
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 /* This is most likely an address on the local link.
                  * As we just want to learn remote routes we do not need it.*/
                 continue;
@@ -239,6 +242,7 @@ handle_route_msg(const struct route_table_msg *msg, void *data)
 
             vector_push(handle_data->learned_routes, &rr);
         }
+        VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
         return;
     }
 
@@ -249,6 +253,7 @@ handle_route_msg(const struct route_table_msg *msg, void *data)
                     && ar->plen == rd->rtm_dst_len
                     && ar->priority == rd->rta_priority) {
                 hmapx_find_and_delete(handle_data->routes_to_advertise, ar);
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 return;
             }
         }
