@@ -17126,6 +17126,10 @@ build_lrouter_nat_defrag_and_lb(
                     actions, "eth.dst = %s; next;",
                     nat_entry->is_distributed ? nat->external_mac :
                     nat_entry->l3dgw_port->lrp_networks.ea_s);
+                if (nat_entry->is_distributed) {
+                    ds_put_format(match, " && is_chassis_resident(\"%s\")",
+                        nat_entry->l3dgw_port->json_key);
+                }
                 VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 ovn_lflow_add_with_hint(lflows, od,
                                         S_ROUTER_IN_ARP_RESOLVE,
