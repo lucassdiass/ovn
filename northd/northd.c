@@ -14423,7 +14423,6 @@ build_arp_resolve_flows_for_lrp(struct ovn_port *op,
             ds_clear(actions);
             ds_put_format(actions, "eth.dst = %s; next;",
                           op->lrp_networks.ea_s);
-
             ovn_lflow_add_with_hint(lflows, op->od,
                                     S_ROUTER_IN_ARP_RESOLVE, 50,
                                     ds_cstr(match), ds_cstr(actions),
@@ -14729,6 +14728,7 @@ build_arp_resolve_flows_for_lsp(
 
                     ds_clear(actions);
                     ds_put_format(actions, "eth.dst = %s; next;", ea_s);
+                    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                     ovn_lflow_add_with_hint(lflows, peer->od,
                                             S_ROUTER_IN_ARP_RESOLVE, 100,
                                             ds_cstr(match),
@@ -14776,6 +14776,7 @@ build_arp_resolve_flows_for_lsp(
                 ds_clear(actions);
                 ds_put_format(actions, "eth.dst = %s; next;",
                                           router_port->lrp_networks.ea_s);
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 ovn_lflow_add_with_hint(lflows, peer->od,
                                         S_ROUTER_IN_ARP_RESOLVE, 100,
                                         ds_cstr(match), ds_cstr(actions),
@@ -17125,6 +17126,7 @@ build_lrouter_nat_defrag_and_lb(
                     actions, "eth.dst = %s; next;",
                     nat_entry->is_distributed ? nat->external_mac :
                     nat_entry->l3dgw_port->lrp_networks.ea_s);
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 ovn_lflow_add_with_hint(lflows, od,
                                         S_ROUTER_IN_ARP_RESOLVE,
                                         100, ds_cstr(match),
@@ -17494,6 +17496,7 @@ build_routable_flows_for_router_port(
                 ds_clear(actions);
                 ds_put_format(actions, "eth.dst = %s; next;",
                               ra.laddrs[k].ea_s);
+                VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
                 ovn_lflow_add(lflows, router_port->od, S_ROUTER_IN_ARP_RESOLVE,
                               100, ds_cstr(match), ds_cstr(actions),
                               lrp->stateful_lflow_ref);
