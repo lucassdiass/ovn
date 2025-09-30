@@ -14410,6 +14410,8 @@ build_arp_resolve_flows_for_lrouter(
                     ds_put_format(&match, "%s",
                         lrp_networks.ipv6_addrs->addr_s);
                 }
+                ds_put_format(&match, " && is_chassis_resident(\"%s\")", lrp->name);
+
 
                 ovn_lflow_add_drop_with_desc(lflows, od,
                     S_ROUTER_IN_ARP_RESOLVE, 50,
