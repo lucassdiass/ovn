@@ -1006,7 +1006,8 @@ parse_route(const char *s_prefix, const char *s_nexthop,
     }
 
     unsigned int nlen;
-    if (!ip46_parse_cidr(s_nexthop, nexthop, &nlen)) {
+    if (strcmp(s_nexthop, "discard") != 0 &&
+        !ip46_parse_cidr(s_nexthop, nexthop, &nlen)) {
         return false;
     }
 
@@ -1232,6 +1233,7 @@ add_static_to_routes_ad(
     unsigned int plen;
     if (!parse_route(nb_route->ip_prefix, nb_route->nexthop,
                      &prefix, &plen, &nexthop)) {
+        VLOG_INFO("LUCAS %s %s",nb_route->ip_prefix, nb_route->nexthop);
         return;
     }
 
