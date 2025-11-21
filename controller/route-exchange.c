@@ -176,7 +176,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
         SMAP_FOR_EACH (port_node, bound_ports) {
             /* The user specified an ifname, but we learned it on a different
              * port. */
-            VLOG_INFO("LUCAS %d %s", __LINE__, port_node->key);
+            VLOG_INFO("LUCAS %d %s %s %s", __LINE__, port_node->key, nexthop, ip_prefix);
             if (port_node->value && strcmp(port_node->value,
                                            learned_route->ifname)) {
                 continue;
