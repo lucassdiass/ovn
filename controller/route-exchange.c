@@ -188,13 +188,38 @@ sb_sync_learned_routes(const struct vector *learned_routes,
             if (!logical_port) {
                 continue;
             }
-            //struct lport_addresses logical_port_addrs;
-            //if (!extract_lsp_addresses(logical_port->mac, &logical_port_addrs)) {
-            //    destroy_lport_addresses(&ts_port_addrs);
-            //    continue;
-            //}
-            for (size_t i = 0; i < logical_port->n_mac; i++) {
-                VLOG_INFO("LUCAS %d %s", __LINE__, logical_port->mac[i]);
+            bool is_same_subnet = false;
+            for (size_t i = 0; !is_same_subnet && i < logical_port->n_mac; i++) {
+                struct lport_addresses logical_port_addrs;
+                if (!extract_lsp_addresses(logical_port->mac[i], &logical_port_addrs)) {
+                    destroy_lport_addresses(&logical_port_addrs);
+                    continue;
+                }
+                if (IN6_IS_ADDR_V4MAPPED(&learned_route->nexthop)) {
+                    ovs_be32 neigh_prefix_v4 =
+                        in6_addr_get_mapped_ipv4(&learned_route->nexthop);
+                    for (size_t j = 0; j < logical_port_addrs.n_ipv4_addrs; j++) {
+                        struct ipv4_netaddr address = logical_port_addrs.ipv4_addrs[j];
+                        if (address.network == (neigh_prefix_v4 & address.mask)) {
+                            is_same_subnet = true;
+                            break;
+                        }
+                    }
+                } else {
+                    for (size_t j = 0; j < logical_port_addrs.n_ipv6_addrs; j++) {
+                        struct ipv6_netaddr address = logical_port_addrs.ipv6_addrs[j];
+                        struct in6_addr neigh_prefix =
+                            ipv6_addr_bitand(&learned_route->nexthop, &address.mask);
+                        if (ipv6_addr_equals(&address.network, &neigh_prefix)) {
+                            is_same_subnet = true;
+                            break;
+                        }
+                    }
+                }
+                destroy_lport_addresses(&logical_port_addrs);
+            }
+            if (!is_same_subnet) {
+                continue;
             }
             route_e = route_lookup(&sync_routes, datapath,
                                    logical_port, ip_prefix, nexthop);
