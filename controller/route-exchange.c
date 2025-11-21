@@ -188,6 +188,14 @@ sb_sync_learned_routes(const struct vector *learned_routes,
             if (!logical_port) {
                 continue;
             }
+            //struct lport_addresses logical_port_addrs;
+            //if (!extract_lsp_addresses(logical_port->mac, &logical_port_addrs)) {
+            //    destroy_lport_addresses(&ts_port_addrs);
+            //    continue;
+            //}
+            for (size_t i = 0; i < logical_port->n_mac; i++) {
+                VLOG_INFO("LUCAS %d %s", __LINE__, logical_port->mac[i]);
+            }
             route_e = route_lookup(&sync_routes, datapath,
                                    logical_port, ip_prefix, nexthop);
             if (route_e) {
