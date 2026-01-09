@@ -17106,6 +17106,11 @@ blackhole 42.10.10.23 proto ovn metric 100
 blackhole 42.20.10.23 proto ovn metric 100
 blackhole 42.20.10.24 proto ovn metric 100])
 
+check ovn-nbctl --wait=hv ls-del ls-int1
+check ovn-nbctl --wait=hv ls-del ls-int2
+check ovn-nbctl --wait=hv ls-del ls
+check ovn-nbctl --wait=hv lr-del lr
+
 OVN_CLEANUP_CONTROLLER([hv1])
 
 OVN_CLEANUP_NORTHD
