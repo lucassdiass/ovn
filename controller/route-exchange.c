@@ -102,6 +102,7 @@ route_add_entry(struct hmap *routes,
     hash = hash_string(sb_route->ip_prefix, hash);
 
     hmap_insert(routes, &route_e->hmap_node, hash);
+    return route_e;
 }
 
 static struct route_entry *
