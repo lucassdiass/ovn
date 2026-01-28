@@ -20591,7 +20591,7 @@ check ovn-nbctl lr-add lr-frr \
         options:dynamic-routing-redistribute=static
 
 check ovn-nbctl lrp-add lr-frr lrp-local-bgp-port 00:00:00:00:00:03 20.0.0.3/24 \
-    -- set Logical_Router_Port lrp-local-bgp-port options:dynamic-routing-maintain-vrf=true \
+    -- set Logical_Router_Port lrp-local-bgp-port options:dynamic-routing-maintain-vrf=false \
     -- set Logical_Router_Port lrp-local-bgp-port options:routing-protocol-redirect=local-bgp-port
 
 check ovn-nbctl lrp-set-gateway-chassis lrp-local-bgp-port hv1
@@ -20633,7 +20633,6 @@ wait_row_count Advertised_Route 1 ip_prefix=10.10.2.1
 
 # Add a route to the VRF (simulating BGP learning a route)
 check ip route add 10.10.3.1 via 20.0.0.25 vrf vrf-$id proto zebra
-
 
 # Verify learned route appears in SB database
 check_row_count Learned_Route 2 ip_prefix=10.10.3.1
