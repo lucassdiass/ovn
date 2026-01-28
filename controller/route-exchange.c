@@ -164,7 +164,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
         const char *dynamic_routing_port_name =
             smap_get(&sb_route->logical_port->options,
                      "dynamic-routing-port-name");
-        if (!dynamic_routing_port_name) {
+        if (!dynamic_routing_port_name && cr_pb) {
             dynamic_routing_port_name =
                 smap_get(&cr_pb->options, "dynamic-routing-port-name");
         }
@@ -248,7 +248,7 @@ sb_sync_learned_routes(const struct vector *learned_routes,
                 sbrec_learned_route_set_ip_prefix(sb_route, ip_prefix);
                 sbrec_learned_route_set_nexthop(sb_route, nexthop);
 
-                route_add_entry(&sync_routes, sb_route, true);
+                route_add_entry(&sync_routes, sb_route, false);
             }
         }
         free(ip_prefix);
