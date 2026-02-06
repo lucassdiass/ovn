@@ -209,7 +209,14 @@ sb_sync_learned_routes(const struct vector *learned_routes,
                 sbrec_learned_route_set_logical_port(sb_route, logical_port);
                 sbrec_learned_route_set_ip_prefix(sb_route, ip_prefix);
                 sbrec_learned_route_set_nexthop(sb_route, nexthop);
-
+                char *uuid_s =
+                    xasprintf(UUID_FMT,
+                              UUID_ARGS(&datapath->header_.uuid));
+                const struct smap external_ids = SMAP_INITIALIZER(&external_ids);
+                smap_add(&external_ids, "datapath", uuid_s);
+                sbrec_learned_route_set_external_ids(sb_route, &external_ids);
+                smap_destroy(&external_ids);
+                free(uuid_s);
                 route_add_entry(&sync_routes, sb_route, false);
             }
         }
