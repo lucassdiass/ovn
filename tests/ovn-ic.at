@@ -3395,6 +3395,65 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- check loop with LSP of duplicated address])
+
+ovn_init_ic_db
+
+for i in 1 2 3; do
+    ovn_start az$i
+    ovn_as az$i
+
+    # Enable route learning at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    # Enable route advertising at AZ level
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+done
+
+# Create new transit switches and LRs. Test topology is next:
+#
+#                       / transit switch (ts11) \
+# logical router (lr11) -                       - logical router (lr12)
+#                       \ transit switch (ts12) /
+#
+
+# Create lr11, lr12, ts11, ts12 and connect them
+for i in 1 2 3; do
+    ovn_as az$i
+
+    lr=lr1$i
+    check ovn-nbctl lr-add $lr
+
+    for j in 1; do
+        ts=ts1$j
+        check ovn-ic-nbctl --wait=sb --may-exist ts-add $ts
+
+        lrp=lrp-$lr-$ts
+        lsp=lsp-$ts-$lr
+        # Create LRP and connect to TS
+        if (( i % 2 == 0 )); then
+            check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.101.$i/24
+        else
+            check ovn-nbctl lrp-add $lr $lrp aa:aa:aa:aa:a$j:0$i 169.254.101.1/24
+        fi
+        check ovn-nbctl lsp-add-router-port $ts $lsp $lrp
+    done
+done
+
+# Create directly-connected route in lr11
+check ovn_as az1 ovn-nbctl lrp-add lr11 lrp-lr11 aa:aa:aa:aa:bb:01 "192.168.0.1/24"
+check ovn_as az3 ovn-nbctl lrp-add lr13 lrp-lr13 aa:aa:aa:aa:bb:03 "192.168.0.1/24"
+sleep 5
+OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep 192.168 |
+             grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
+192.168.0.0/24 169.254.101.1
+])
+
+OVN_CLEANUP_IC([az1], [az2], [az3])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
 AT_SETUP([ovn-ic -- prefix filter -- filtering routes])
 ovn_init_ic_db
 ovn-ic-nbctl ts-add ts1
