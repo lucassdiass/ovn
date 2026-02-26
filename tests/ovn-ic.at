@@ -3447,6 +3447,7 @@ sleep 2
 OVS_WAIT_FOR_OUTPUT([ovn_as az2 ovn-nbctl lr-route-list lr12 | grep 192.168 |
              grep learned | awk '{print $1, $2}' | sort ], [0], [dnl
 192.168.0.0/24 169.254.101.1
+192.168.0.0/24 169.254.101.1
 ])
 
 OVN_CLEANUP_IC([az1], [az2], [az3])
