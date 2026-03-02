@@ -39,6 +39,7 @@ enum engine_node_state en_route_policies_run(struct engine_node *node,
                                              void *data);
 void *en_route_policies_init(struct engine_node *node OVS_UNUSED,
                              struct engine_arg *arg OVS_UNUSED);
+void en_routes_clear_tracked_data(void *data);
 void en_routes_cleanup(void *data);
 enum engine_input_handler_result
 routes_northd_change_handler(struct engine_node *node, void *data OVS_UNUSED);
