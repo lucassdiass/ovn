@@ -539,7 +539,7 @@ group_ecmp_static_route_change_handler(struct engine_node *eng_node,
     }
 
     HMAPX_FOR_EACH (hmapx_node,
-                    &routes_data->trk_data.trk_created_parsed_route) {
+                    &routes_data->trk_data.trk_crupdated_parsed_route) {
         pr = hmapx_node->data;
         handle_added_route(data, pr, &updated_routes);
     }

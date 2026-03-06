@@ -328,6 +328,7 @@ enum engine_input_handler_result
 routes_northd_change_handler(struct engine_node *node,
                                     void *data)
 {
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     if (!northd_has_tracked_data(&northd_data->trk_data)) {
         return EN_UNHANDLED;
@@ -345,59 +346,100 @@ routes_northd_change_handler(struct engine_node *node,
         od = hmapx_node->data;
         struct parsed_route *pr;
 
-        size_t hash = uuid_hash(&od->key);
-        HMAP_FOR_EACH_WITH_HASH (pr, key_node, hash, 
-                                 &routes_data->parsed_routes) {
-            if (pr->source == ROUTE_SOURCE_STATIC &&
-                pr->od == od) {
-                pr->stale = true;
-            }
-        }
         for (int i = 0; i < od->nbr->n_static_routes; i++) {
             struct nbrec_logical_router_static_route *static_route =
                 od->nbr->static_routes[i];
-            pr = parsed_routes_add_static(od, &northd_data->lr_ports,
-                                          static_route,
-                                          &bfd_data->bfd_connections,
-                                          &routes_data->parsed_routes,
-                                          &routes_data->route_tables,
-                                          &routes_data->bfd_active_connections);
-            if (!pr) {
+            if (nbrec_logical_router_static_route_is_new(static_route)) {
+                pr = parsed_routes_add_static(od, &northd_data->lr_ports,
+                                              static_route,
+                                              &bfd_data->bfd_connections,
+                                              &routes_data->parsed_routes,
+                                              &routes_data->route_tables,
+                                              &routes_data->bfd_active_connections);
+                if (!pr) {
+                    continue;
+                }
+
+                if (pr->nexthop &&
+                    IN6_IS_ADDR_V4MAPPED(&pr->prefix) !=
+                    IN6_IS_ADDR_V4MAPPED(pr->nexthop)) {
+                    return EN_UNHANDLED;
+                }
+                pr->stale = false;
+
+                hmapx_add(&routes_data->trk_data.trk_crupdated_parsed_route,
+                          pr);
+            }
+        }
+    }
+
+    if (!hmapx_is_empty(&routes_data->trk_data.trk_crupdated_parsed_route)) {
+        routes_data->tracked = true;
+        return EN_HANDLED_UPDATED;
+    }
+
+    if (hmapx_is_empty(&routes_data->trk_data.trk_crupdated_parsed_route) &&
+        hmapx_is_empty(&routes_data->trk_data.trk_deleted_parsed_route)) {
+        return EN_UNHANDLED;
+    }
+
+    return EN_HANDLED_UNCHANGED;
+}
+enum engine_input_handler_result
+routes_static_route_change_handler(struct engine_node *node,
+                                   void *data)
+{
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
+    struct routes_data *routes_data = data;
+
+    const struct nbrec_logical_router_static_route_table *nb_lr_static_route_table =
+        EN_OVSDB_GET(engine_get_input("NB_logical_router_static_route", node));
+
+    struct northd_data *northd_data = engine_get_input_data("northd", node);
+    struct bfd_data *bfd_data = engine_get_input_data("bfd", node);
+
+    const struct nbrec_logical_router_static_route *changed_static_route;
+    NBREC_LOGICAL_ROUTER_STATIC_ROUTE_TABLE_FOR_EACH (changed_static_route, nb_lr_static_route_table) {
+        if (nbrec_logical_router_static_route_is_deleted(changed_static_route) &&
+            nbrec_logical_router_static_route_is_new(changed_static_route)) {
                 continue;
             }
-
+        if (nbrec_logical_router_static_route_is_deleted(changed_static_route)) {
+            struct parsed_route *pr = parsed_route_lookup_by_source(
+                ROUTE_SOURCE_STATIC, &changed_static_route->header_, &routes_data->parsed_routes);
+            if (pr) {
+                pr->stale = true;
+            }
+            hmapx_add(&routes_data->trk_data.trk_deleted_parsed_route, pr);
+        } else if (nbrec_logical_router_static_route_is_updated(changed_static_route, NBREC_LOGICAL_ROUTER_STATIC_ROUTE_COL_NEXTHOP) ||
+                   nbrec_logical_router_static_route_is_updated(changed_static_route, NBREC_LOGICAL_ROUTER_STATIC_ROUTE_COL_OUTPUT_PORT) ||
+                   nbrec_logical_router_static_route_is_updated(changed_static_route, NBREC_LOGICAL_ROUTER_STATIC_ROUTE_COL_POLICY) ||
+                   nbrec_logical_router_static_route_is_updated(changed_static_route, NBREC_LOGICAL_ROUTER_STATIC_ROUTE_COL_ROUTE_TABLE) ||
+                   nbrec_logical_router_static_route_is_updated(changed_static_route, NBREC_LOGICAL_ROUTER_STATIC_ROUTE_COL_SELECTION_FIELDS)) {
+            struct parsed_route *pr = parsed_route_lookup_by_source(
+                ROUTE_SOURCE_STATIC, &changed_static_route->header_, &routes_data->parsed_routes);
+            if (!pr || !pr->od || !northd_data || !bfd_data) {
+                continue;
+            }
+            parsed_routes_add_static(pr->od, &northd_data->lr_ports,
+                                     changed_static_route,
+                                     &bfd_data->bfd_connections,
+                                     &routes_data->parsed_routes,
+                                     &routes_data->route_tables,
+                                     &routes_data->bfd_active_connections);
             if (pr->nexthop &&
                 IN6_IS_ADDR_V4MAPPED(&pr->prefix) !=
                 IN6_IS_ADDR_V4MAPPED(pr->nexthop)) {
                 return EN_UNHANDLED;
             }
-            pr->stale = false;
-
-            if (nbrec_logical_router_static_route_is_new(static_route)) {
-                hmapx_add(&routes_data->trk_data.trk_created_parsed_route,
-                          pr);
-            }
-        }
-
-        HMAP_FOR_EACH_WITH_HASH (pr, key_node, hash, 
-                                 &routes_data->parsed_routes) {
-            if (pr->source == ROUTE_SOURCE_STATIC &&
-                pr->od == od && pr->stale) {
-                hmapx_add(&routes_data->trk_data.trk_deleted_parsed_route,
-                          pr);
-            }
+            hmapx_add(&routes_data->trk_data.trk_crupdated_parsed_route,
+                        pr);
         }
     }
-
-    if (!hmapx_is_empty(&routes_data->trk_data.trk_created_parsed_route) ||
+    if (!hmapx_is_empty(&routes_data->trk_data.trk_crupdated_parsed_route) ||
         !hmapx_is_empty(&routes_data->trk_data.trk_deleted_parsed_route)) {
         routes_data->tracked = true;
         return EN_HANDLED_UPDATED;
-    }
-
-    if (hmapx_is_empty(&routes_data->trk_data.trk_created_parsed_route) &&
-        hmapx_is_empty(&routes_data->trk_data.trk_deleted_parsed_route)) {
-        return EN_UNHANDLED;
     }
 
     return EN_HANDLED_UNCHANGED;
@@ -406,6 +448,7 @@ routes_northd_change_handler(struct engine_node *node,
 enum engine_node_state
 en_routes_run(struct engine_node *node, void *data)
 {
+    VLOG_INFO("LUCAS %s %d", __func__, __LINE__);
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     struct bfd_data *bfd_data = engine_get_input_data("bfd", node);
     struct routes_data *routes_data = data;

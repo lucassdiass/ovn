@@ -149,9 +149,11 @@ digraph "Incremental-Processing-Engine" {
 	bfd [[style=filled, shape=box, fillcolor=white, label="bfd"]];
 	NB_bfd -> bfd [[label=""]];
 	SB_bfd -> bfd [[label=""]];
+	NB_logical_router_static_route [[style=filled, shape=box, fillcolor=white, label="NB_logical_router_static_route"]];
 	routes [[style=filled, shape=box, fillcolor=white, label="routes"]];
 	bfd -> routes [[label=""]];
 	northd -> routes [[label="routes_northd_change_handler"]];
+	NB_logical_router_static_route -> routes [[label="routes_static_route_change_handler"]];
 	route_policies [[style=filled, shape=box, fillcolor=white, label="route_policies"]];
 	bfd -> route_policies [[label=""]];
 	northd -> route_policies [[label="route_policies_northd_change_handler"]];

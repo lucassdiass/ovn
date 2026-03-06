@@ -77,6 +77,8 @@ static unixctl_cb_func chassis_features_list;
     NB_NODE(network_function) \
     NB_NODE(network_function_group) \
     NB_NODE(logical_switch_port_health_check) \
+    NB_NODE(logical_router_static_route)
+
 
     enum nb_engine_node {
 #define NB_NODE(NAME) NB_##NAME,
@@ -335,6 +337,8 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_routes, &en_bfd, NULL);
     engine_add_input(&en_routes, &en_northd,
                      routes_northd_change_handler);
+    engine_add_input(&en_routes, &en_nb_logical_router_static_route,
+                     routes_static_route_change_handler);
 
     engine_add_input(&en_bfd_sync, &en_bfd, NULL);
     engine_add_input(&en_bfd_sync, &en_nb_bfd, NULL);

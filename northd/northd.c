@@ -5318,9 +5318,9 @@ is_lr_nats_changed(const struct nbrec_logical_router *nbr) {
 static bool
 is_lr_static_routes_changed(const struct nbrec_logical_router *nbr) {
     return nbrec_logical_router_is_updated(nbr,
-                                    NBREC_LOGICAL_ROUTER_COL_STATIC_ROUTES);
-
+                                   NBREC_LOGICAL_ROUTER_COL_STATIC_ROUTES);
 }
+
 /* Return true if changes are handled incrementally, false otherwise.
  *
  * Note: Changes to load balancer and load balancer groups associated with
@@ -20827,7 +20827,7 @@ routes_init(struct routes_data *data)
     hmap_init(&data->bfd_active_connections);
     data->tracked = false;
     hmapx_init(&data->trk_data.trk_deleted_parsed_route);
-    hmapx_init(&data->trk_data.trk_created_parsed_route);
+    hmapx_init(&data->trk_data.trk_crupdated_parsed_route);
 }
 
 void
@@ -20959,7 +20959,7 @@ routes_destroy(struct routes_data *data)
     simap_destroy(&data->route_tables);
     __bfd_destroy(&data->bfd_active_connections);
     data->tracked = false;
-    hmapx_destroy(&data->trk_data.trk_created_parsed_route);
+    hmapx_destroy(&data->trk_data.trk_crupdated_parsed_route);
     hmapx_destroy(&data->trk_data.trk_deleted_parsed_route);
 }
 
@@ -20967,7 +20967,7 @@ void
 routes_clear_tracked(struct routes_data *data)
 {
     data->tracked = false;
-    hmapx_clear(&data->trk_data.trk_created_parsed_route);
+    hmapx_clear(&data->trk_data.trk_crupdated_parsed_route);
     hmapx_clear(&data->trk_data.trk_deleted_parsed_route);
 }
 
