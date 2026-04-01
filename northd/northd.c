@@ -13942,23 +13942,25 @@ build_lrouter_nat_arp_nd_flow(const struct ovn_datapath *od,
 {
     struct lport_addresses *ext_addrs = &nat_entry->ext_addrs;
     const struct nbrec_nat *nat = nat_entry->nb;
+    uint16_t priority = 90;
     struct ds match = DS_EMPTY_INITIALIZER;
     if (op && lrp_is_l3dgw(op)) {
         ds_put_format(&match, "is_chassis_resident(%s)",
                       op->cr_port->json_key);
+        priority = 92;
     }
 
     if (nat_entry_is_v6(nat_entry)) {
         build_lrouter_nd_flow(od, op, "nd_na",
                               ext_addrs->ipv6_addrs[0].addr_s,
                               ext_addrs->ipv6_addrs[0].sn_addr_s,
-                              REG_INPORT_ETH_ADDR, &match, false, 90,
+                              REG_INPORT_ETH_ADDR, &match, false, priority,
                               &nat->header_, lflows, meter_groups,
                               lflow_ref);
     } else {
         build_lrouter_arp_flow(od, op,
                                ext_addrs->ipv4_addrs[0].addr_s,
-                               REG_INPORT_ETH_ADDR, &match, false, 90,
+                               REG_INPORT_ETH_ADDR, &match, false, priority,
                                &nat->header_, lflows,
                                lflow_ref);
     }
