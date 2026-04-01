@@ -14032,6 +14032,8 @@ build_lrouter_port_nat_arp_nd_flow(struct ovn_port *op,
         if (lrp_is_l3dgw(op) && op->cr_port) {
             ds_put_format(&match, "is_chassis_resident(%s)",
                                    op->cr_port->json_key);
+        } else {
+            op = NULL;
         }
         build_lrouter_nd_flow(op->od, op, "nd_na",
                               ext_addrs->ipv6_addrs[0].addr_s,
@@ -14049,6 +14051,8 @@ build_lrouter_port_nat_arp_nd_flow(struct ovn_port *op,
         if (lrp_is_l3dgw(op) && op->cr_port) {
             ds_put_format(&match, "is_chassis_resident(%s)",
                                    op->cr_port->json_key);
+        } else {
+            op = NULL;
         }
         build_lrouter_arp_flow(op->od, op,
                                ext_addrs->ipv4_addrs[0].addr_s,
@@ -17041,8 +17045,7 @@ build_lrouter_arp_nd_for_datapath(const struct ovn_datapath *od,
                                   const struct lr_nat_record *lrnat_rec,
                                   struct lflow_table *lflows,
                                   const struct shash *meter_groups,
-                                  struct lflow_ref *lflow_ref,
-                                  const struct hmap *lr_ports)
+                                  struct lflow_ref *lflow_ref)
 {
     ovs_assert(od->nbr);
     if (!od->nbr->n_nat) {
@@ -17072,9 +17075,8 @@ build_lrouter_arp_nd_for_datapath(const struct ovn_datapath *od,
             continue;
         }
         struct ovn_port *op = NULL;
-        if (nat_entry->nb->gateway_port) {
-            op = ovn_port_find(lr_ports,
-                                nat_entry->nb->gateway_port->name);
+        if (nat_entry->l3dgw_port) {
+            op = nat_entry->l3dgw_port;
         }
         build_lrouter_nat_arp_nd_flow(od, op, nat_entry, lflows, meter_groups,
                                       lflow_ref);
@@ -17093,9 +17095,8 @@ build_lrouter_arp_nd_for_datapath(const struct ovn_datapath *od,
             CONTAINER_OF(ovs_list_front(&snat_ip->snat_entries),
                          struct ovn_nat, ext_addr_list_node);
         struct ovn_port *op = NULL;
-        if (nat_entry->nb->gateway_port) {
-            op = ovn_port_find(lr_ports,
-                                nat_entry->nb->gateway_port->name);
+        if (nat_entry->l3dgw_port) {
+            op = nat_entry->l3dgw_port;
         }
         build_lrouter_nat_arp_nd_flow(od, op, nat_entry, lflows, meter_groups,
                                       lflow_ref);
@@ -17169,7 +17170,7 @@ build_lrouter_ipv4_ip_input(struct ovn_port *op,
             && !vector_is_empty(&op->peer->od->localnet_ports)) {
             add_lrp_chassis_resident_check(op, match);
         }
-
+        VLOG_INFO("LUCAS %s %d %s %s", __func__, __LINE__, op->lrp_networks.ipv4_addrs[i].addr_s, op->nbrp->name);
         build_lrouter_arp_flow(op->od, op,
                                op->lrp_networks.ipv4_addrs[i].addr_s,
                                REG_INPORT_ETH_ADDR, match, false, 90,
@@ -18777,7 +18778,6 @@ build_lr_stateful_flows(const struct lr_stateful_record *lr_stateful_rec,
                         const struct ovn_datapaths *lr_datapaths,
                         struct lflow_table *lflows,
                         const struct hmap *ls_ports,
-                        const struct hmap *lr_ports,
                         struct ds *match,
                         struct ds *actions,
                         const struct shash *meter_groups,
@@ -18796,7 +18796,7 @@ build_lr_stateful_flows(const struct lr_stateful_record *lr_stateful_rec,
                                              lr_stateful_rec->lflow_ref);
     build_lrouter_arp_nd_for_datapath(od, lr_stateful_rec->lrnat_rec,
                                       lflows, meter_groups,
-                                      lr_stateful_rec->lflow_ref, lr_ports);
+                                      lr_stateful_rec->lflow_ref);
 }
 
 static void
@@ -19688,7 +19688,6 @@ build_lflows_thread(void *arg)
                     }
                     build_lr_stateful_flows(lr_stateful_rec, lsi->lr_datapaths,
                                             lsi->lflows, lsi->ls_ports,
-                                            lsi->lr_ports,
                                             &lsi->match, &lsi->actions,
                                             lsi->meter_groups,
                                             lsi->features);
@@ -19942,7 +19941,6 @@ build_lswitch_and_lrouter_flows(
         LR_STATEFUL_TABLE_FOR_EACH (lr_stateful_rec, lr_stateful_table) {
             build_lr_stateful_flows(lr_stateful_rec, lsi.lr_datapaths,
                                     lsi.lflows, lsi.ls_ports,
-                                    lsi.lr_ports,
                                     &lsi.match, &lsi.actions,
                                     lsi.meter_groups, lsi.features);
         }
@@ -20431,11 +20429,9 @@ lflow_handle_lr_stateful_changes(struct ovsdb_idl_txn *ovnsb_txn,
         lr_stateful_rec = hmapx_node->data;
         /* Unlink old lflows. */
         lflow_ref_unlink_lflows(lr_stateful_rec->lflow_ref);
-
         /* Generate new lflows. */
         build_lr_stateful_flows(lr_stateful_rec, lflow_input->lr_datapaths,
                                 lflows, lflow_input->ls_ports,
-                                lflow_input->lr_ports,
                                 &match, &actions,
                                 lflow_input->meter_groups,
                                 lflow_input->features);
