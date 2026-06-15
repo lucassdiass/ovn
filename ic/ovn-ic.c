@@ -1310,7 +1310,6 @@ struct ic_route_info {
     const char *route_table;
     const char *route_tag;
     bool override_connected;
-    struct uuid ic_route_uuid;
 
     const struct nbrec_logical_router *nb_lr;
 
@@ -1337,12 +1336,9 @@ static uint32_t
 ic_route_hash(const struct in6_addr *prefix, unsigned int plen,
               const struct in6_addr *nexthop, const char *origin,
               const char *route_table,
-              const struct uuid *ic_route_uuid,
               bool override_connected)
 {
-    uint32_t basis = ic_route_uuid ? uuid_hash(ic_route_uuid) : 0;
-    basis = hash_bytes(prefix, sizeof *prefix, basis);
-    basis = hash_int((uint32_t) plen, basis);
+    uint32_t basis = hash_bytes(prefix, sizeof *prefix, (uint32_t)plen);
     basis = hash_string(origin, basis);
     basis = hash_string(route_table, basis);
     basis = hash_boolean(override_connected, basis);
@@ -1353,13 +1349,12 @@ static struct ic_route_info *
 ic_route_find(struct hmap *routes, const struct in6_addr *prefix,
               unsigned int plen, const struct in6_addr *nexthop,
               const char *origin, const char *route_table,
-              const struct uuid *ic_route_uuid,
               bool override_connected, uint32_t hash)
 {
     struct ic_route_info *r;
     if (!hash) {
         hash = ic_route_hash(prefix, plen, nexthop, origin, route_table,
-                             ic_route_uuid, override_connected);
+                             override_connected);
     }
     HMAP_FOR_EACH_WITH_HASH (r, node, hash, routes) {
         if (ipv6_addr_equals(&r->prefix, prefix) &&
@@ -1367,9 +1362,7 @@ ic_route_find(struct hmap *routes, const struct in6_addr *prefix,
             r->override_connected == override_connected &&
             ipv6_addr_equals(&r->nexthop, nexthop) &&
             !strcmp(r->origin, origin) &&
-            !strcmp(r->route_table ? r->route_table : "", route_table) &&
-            (!ic_route_uuid || uuid_equals(&r->ic_route_uuid,
-                                           ic_route_uuid))) {
+            !strcmp(r->route_table ? r->route_table : "", route_table)) {
             return r;
         }
     }
@@ -1412,8 +1405,7 @@ parse_route(const char *s_prefix, const char *s_nexthop,
 static bool
 add_to_routes_learned(struct hmap *routes_learned,
                       const struct nbrec_logical_router_static_route *nb_route,
-                      const struct nbrec_logical_router *nb_lr,
-                      const struct uuid *ic_route_uuid)
+                      const struct nbrec_logical_router *nb_lr)
 {
     struct in6_addr prefix, nexthop;
     unsigned int plen;
@@ -1425,10 +1417,10 @@ add_to_routes_learned(struct hmap *routes_learned,
     bool override_connected = get_override_connected(&nb_route->options);
 
     uint32_t hash = ic_route_hash(&prefix, plen, &nexthop, origin,
-                                  nb_route->route_table, ic_route_uuid,
+                                  nb_route->route_table,
                                   override_connected);
     if (ic_route_find(routes_learned, &prefix, plen, &nexthop, origin,
-                      nb_route->route_table, ic_route_uuid,
+                      nb_route->route_table,
                       override_connected, hash)) {
         /* Route was added to learned on previous iteration. */
         return true;
@@ -1442,7 +1434,6 @@ add_to_routes_learned(struct hmap *routes_learned,
     ic_route->origin = origin;
     ic_route->route_table = nb_route->route_table;
     ic_route->nb_lr = nb_lr;
-    ic_route->ic_route_uuid = *ic_route_uuid;
     ic_route->override_connected = override_connected;
     hmap_insert(routes_learned, &ic_route->node, hash);
 
@@ -1613,10 +1604,10 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
     }
 
     uint hash = ic_route_hash(&prefix, plen, &nexthop, origin,
-                              route_table, NULL, override_connected);
+                              route_table, override_connected);
 
     if (!ic_route_find(routes_ad, &prefix, plen, &nexthop, origin, route_table,
-                       NULL, override_connected, hash)) {
+                       override_connected, hash)) {
         struct ic_route_info *ic_route = xzalloc(sizeof *ic_route);
         ic_route->prefix = prefix;
         ic_route->plen = plen;
@@ -2229,10 +2220,21 @@ sync_learned_routes(struct ic_context *ctx,
                 = ic_route_find(&ic_lr->routes_learned, &prefix, plen,
                                 &nexthop, isb_route->origin,
                                 isb_route->route_table,
-                                &isb_route->header_.uuid,
                                 override_connected, 0);
 
             if (route_learned) {
+                /* Sync external-ids */
+                struct uuid ext_id;
+                smap_get_uuid(&route_learned->nb_route->external_ids,
+                              "ic-learned-route", &ext_id);
+                if (!uuid_equals(&ext_id, &isb_route->header_.uuid)) {
+                    char *uuid_s =
+                        xasprintf(UUID_FMT,
+                                  UUID_ARGS(&isb_route->header_.uuid));
+                    nbrec_logical_router_static_route_update_external_ids_setkey(
+                        route_learned->nb_route, "ic-learned-route", uuid_s);
+                    free(uuid_s);
+                }
                 hmap_remove(&ic_lr->routes_learned, &route_learned->node);
                 free(route_learned);
             } else {
@@ -2346,7 +2348,7 @@ advertise_routes(struct ic_context *ctx,
         struct ic_route_info *route_adv =
             ic_route_find(routes_ad, &prefix, plen, &nexthop,
                           isb_route->origin, isb_route->route_table,
-                          NULL, override_connected, 0);
+                          override_connected, 0);
         if (!route_adv) {
             /* Delete the extra route from IC-SB. */
             VLOG_DBG("Delete route %s -> %s from IC-SB, which is not found"
@@ -2424,8 +2426,7 @@ build_ts_routes_to_adv(struct ic_context *ctx,
         if (smap_get_uuid(&nb_route->external_ids, "ic-learned-route",
                           &isb_uuid)) {
             /* It is a learned route */
-            if (!add_to_routes_learned(&ic_lr->routes_learned, nb_route, lr,
-                                       &isb_uuid)) {
+            if (!add_to_routes_learned(&ic_lr->routes_learned, nb_route, lr)) {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
                 VLOG_WARN_RL(&rl, "Bad format of learned route in NB: "
                              "%s -> %s. Delete it.", nb_route->ip_prefix,
