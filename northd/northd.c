@@ -18501,6 +18501,13 @@ build_lrouter_nat_defrag_and_lb(
                  * The packets must have gone through DNAT/unSNAT stage but
                  * failed to convert the destination. */
                 ds_clear(match);
+                /* This packet can only ingress on the gateway port, which is
+                 * redirected to the chassis owning its distributed gateway
+                 * port, so restrict the flow to that chassis. */
+                if (nat_entry->l3dgw_port->cr_port) {
+                    ds_put_format(match, "is_chassis_resident(%s) && ",
+                                  nat_entry->l3dgw_port->cr_port->json_key);
+                }
                 ds_put_format(
                     match, "inport == %s && outport == %s && ip%s.dst == %s",
                     nat_entry->l3dgw_port->json_key,

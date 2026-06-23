@@ -3324,10 +3324,12 @@ contains the final destination.)  This table resolves the IP address in ``reg0``
   resolution flows if the ``options:add_route`` is set to ``true``. Otherwise,
   no ARP resolution flows will be added.
 
-  Corresponding to the above flow, a priority-150 flow with the match ``inport
-  == P && outport == P && ip4.dst == A`` has actions ``drop;`` to exclude
-  packets that have gone through DNAT/unSNAT stage but failed to convert the
-  destination, to avoid loop.
+  Corresponding to the above flow, a priority-150 flow with the match
+  ``is_chassis_resident(cr-P) && inport == P && outport == P && ip4.dst == A``
+  has actions ``drop;`` to exclude packets that have gone through DNAT/unSNAT
+  stage but failed to convert the destination, to avoid loop. The
+  ``is_chassis_resident`` check restricts this flow to the gateway chassis that
+  owns the distributed gateway port, where such packets ingress.
 
   For IPv6 NAT entries, same flows are added, but using the register ``xxreg0``
   and field ``ip6`` for the match.
