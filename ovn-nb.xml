@@ -576,6 +576,16 @@
           option <code>ic-route-learn</code> is <code>true</code>.
         </column>
 
+        <column name="options" key="ic-route-adv-ipv4-over-ipv6">
+          A boolean value that allows IPv4 routes to be advertised to the
+          global <ref db="OVN_IC_Southbound"/> database with an IPv6 next hop
+          when the logical router port attached to the transit switch has no
+          IPv4 address.  This makes it possible to advertise IPv4 routes over
+          an IPv6-only transit switch.  Default is <code>false</code>.  This
+          option takes effect only when option <code>ic-route-adv</code> is
+          <code>true</code>.
+        </column>
+
         <column name="options" key="ic-route-denylist">
           A string value contains a list of CIDRs delimited by ",".  A route
           will not be advertised or learned if the route's prefix belongs to

@@ -729,6 +729,69 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync -- IPv4 over IPv6])
+
+ovn_init_ic_db
+ovn-ic-nbctl ts-add ts1
+
+for i in 1 2; do
+    ovn_start az$i
+    ovn_as az$i
+    check ovn-ic-nbctl --wait=sb sync
+    check ovn-nbctl set nb_global . options:ic-route-learn=true
+    check ovn-nbctl set nb_global . options:ic-route-adv=true
+
+    # Connect each LR to the transit switch with an IPv6-only port.
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lrp-lr$i-ts1 aa:aa:aa:aa:aa:0$i 2001:db8:1::$i/64
+    check ovn-nbctl lsp-add-router-port ts1 lsp-ts1-lr$i lrp-lr$i-ts1
+
+    # Advertise an IPv4 static route.
+    check ovn-nbctl lr-route-add lr$i 10.11.$i.0/24 169.254.0.1
+done
+
+# By default the IPv4 routes are not advertised over the IPv6-only transit
+# switch, so nothing should be learned.
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+wait_row_count ic-sb:Route 0 ip_prefix=10.11.1.0/24
+AT_CHECK([ovn_as az2 ovn-nbctl lr-route-list lr2 | grep -c learned], [1], [dnl
+0
+])
+
+# Enable advertising IPv4 routes over IPv6 next hops.
+for i in 1 2; do
+    check ovn_as az$i ovn-nbctl set nb_global . \
+        options:ic-route-adv-ipv4-over-ipv6=true
+done
+check ovn-ic-nbctl --wait=sb sync
+check ovn-ic-nbctl --wait=sb sync
+
+# The IPv4 prefix is now advertised to IC-SB with an IPv6 next hop.
+AT_CHECK([ovn-ic-sbctl --columns=ip_prefix,nexthop --bare find route \
+              ip_prefix=10.11.1.0/24 | sort], [0], [dnl
+10.11.1.0/24
+2001:db8:1::1
+])
+
+# Each AZ learns the other AZ's IPv4 route with the remote IPv6 next hop.
+for i in 1 2; do
+    OVS_WAIT_UNTIL([ovn_as az$i ovn-nbctl lr-route-list lr$i | grep learned])
+done
+
+AT_CHECK([ovn_as az1 ovn-nbctl lr-route-list lr1], [0], [dnl
+IPv4 Routes
+Route Table <main>:
+             10.11.1.0/24               169.254.0.1 dst-ip
+             10.11.2.0/24             2001:db8:1::2 dst-ip (learned)
+])
+
+OVN_CLEANUP_IC([az1], [az2])
+
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
 AT_SETUP([ovn-ic -- route sync -- loadbalancer])
 
 ovn_init_ic_db

@@ -1,5 +1,9 @@
 Post v26.03.0
 -------------
+   - OVN Interconnection: added the "ic-route-adv-ipv4-over-ipv6" NB_Global
+     option, which allows IPv4 routes to be advertised with an IPv6 next hop
+     when the transit switch router port has no IPv4 address, enabling IPv4
+     route advertisement over an IPv6-only transit switch.
    - Added ability to set any "ipsec_*" NB_Global option to configure the
      IPsec backend.
    - Documented missing ovn-nbctl commands: "mirror-rule-add",
