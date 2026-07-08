@@ -592,6 +592,40 @@ chassis_tunnels_destroy(struct hmap *chassis_tunnels)
     hmap_destroy(chassis_tunnels);
 }
 
+/* Returns true if the two chassis tunnel maps contain the same set of
+ * tunnels with the same attributes. */
+bool
+chassis_tunnels_equal(const struct hmap *a, const struct hmap *b)
+{
+    if (hmap_count(a) != hmap_count(b)) {
+        return false;
+    }
+
+    const struct chassis_tunnel *tun_a;
+    HMAP_FOR_EACH (tun_a, hmap_node, a) {
+        const struct chassis_tunnel *tun_b;
+        bool found = false;
+
+        HMAP_FOR_EACH_WITH_HASH (tun_b, hmap_node, tun_a->hmap_node.hash, b) {
+            if (!strcmp(tun_a->chassis_id, tun_b->chassis_id)) {
+                if (tun_a->ofport != tun_b->ofport
+                    || tun_a->type != tun_b->type
+                    || tun_a->is_ipv6 != tun_b->is_ipv6
+                    || tun_a->is_ramp_tunnel != tun_b->is_ramp_tunnel) {
+                    return false;
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 
 /*
  * This function looks up the list of tunnel ports (provided by
@@ -788,6 +822,23 @@ flow_based_tunnels_destroy(struct flow_based_tunnel *flow_tunnels)
         flow_tunnels[i].port_name = NULL;
         flow_tunnels[i].ofport = 0;
     }
+}
+
+/* Returns true if the two flow-based tunnel arrays are identical. */
+bool
+flow_based_tunnels_equal(const struct flow_based_tunnel *a,
+                         const struct flow_based_tunnel *b)
+{
+    for (size_t i = 0; i < TUNNEL_TYPE_MAX; i++) {
+        if (a[i].ofport != b[i].ofport || a[i].is_ipv6 != b[i].is_ipv6) {
+            return false;
+        }
+        if (!!a[i].port_name != !!b[i].port_name
+            || (a[i].port_name && strcmp(a[i].port_name, b[i].port_name))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 ofp_port_t

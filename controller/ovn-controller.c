@@ -3649,6 +3649,16 @@ struct ed_type_non_vif_data {
                                  /* Array of flow-based tunnels indexed by
                                   * tunnel type. */
     bool use_flow_based_tunnels; /* Enable flow-based tunnels. */
+
+    /* Tracked data recording which pieces of the above changed during the
+     * last run().  Consumers (e.g. lflow_output/pflow_output) inspect these
+     * flags to decide whether they can be skipped.  Reset by
+     * clear_tracked_data() at the start of every engine run. */
+    struct {
+        bool patch_ofports_changed;
+        bool chassis_tunnels_changed;
+        bool flow_tunnels_changed;
+    } trk_changes;
 };
 
 static void *
@@ -3672,17 +3682,18 @@ en_non_vif_data_cleanup(void *data OVS_UNUSED)
     flow_based_tunnels_destroy(ed_non_vif_data->flow_tunnels);
 }
 
+static void
+en_non_vif_data_clear_tracked_data(void *data)
+{
+    struct ed_type_non_vif_data *ed_non_vif_data = data;
+    memset(&ed_non_vif_data->trk_changes, 0,
+           sizeof ed_non_vif_data->trk_changes);
+}
+
 static enum engine_node_state
 en_non_vif_data_run(struct engine_node *node, void *data)
 {
     struct ed_type_non_vif_data *ed_non_vif_data = data;
-    simap_destroy(&ed_non_vif_data->patch_ofports);
-    chassis_tunnels_destroy(&ed_non_vif_data->chassis_tunnels);
-    flow_based_tunnels_destroy(ed_non_vif_data->flow_tunnels);
-
-    simap_init(&ed_non_vif_data->patch_ofports);
-    hmap_init(&ed_non_vif_data->chassis_tunnels);
-    flow_based_tunnels_init(ed_non_vif_data->flow_tunnels);
 
     const struct ovsrec_open_vswitch_table *ovs_table =
         EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
@@ -3702,15 +3713,56 @@ en_non_vif_data_run(struct engine_node *node, void *data)
         = chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id);
     ovs_assert(chassis);
 
-    ed_non_vif_data->use_flow_based_tunnels =
-        is_flow_based_tunnels_enabled(ovs_table, chassis);
+    /* Build the fresh data into temporaries so that we can diff it against
+     * the previously computed data and only report to consumers the pieces
+     * that actually changed. */
+    struct simap new_patch_ofports = SIMAP_INITIALIZER(&new_patch_ofports);
+    struct hmap new_chassis_tunnels;
+    struct flow_based_tunnel new_flow_tunnels[TUNNEL_TYPE_MAX];
+    hmap_init(&new_chassis_tunnels);
+    flow_based_tunnels_init(new_flow_tunnels);
 
     local_nonvif_data_run(br_int, chassis,
-                          &ed_non_vif_data->patch_ofports,
-                          &ed_non_vif_data->chassis_tunnels,
-                          ed_non_vif_data->flow_tunnels);
+                          &new_patch_ofports,
+                          &new_chassis_tunnels,
+                          new_flow_tunnels);
 
-    return EN_UPDATED;
+    bool new_use_flow_based_tunnels =
+        is_flow_based_tunnels_enabled(ovs_table, chassis);
+
+    ed_non_vif_data->trk_changes.patch_ofports_changed =
+        !simap_equal(&ed_non_vif_data->patch_ofports, &new_patch_ofports);
+    ed_non_vif_data->trk_changes.chassis_tunnels_changed =
+        !chassis_tunnels_equal(&ed_non_vif_data->chassis_tunnels,
+                               &new_chassis_tunnels);
+    ed_non_vif_data->trk_changes.flow_tunnels_changed =
+        !flow_based_tunnels_equal(ed_non_vif_data->flow_tunnels,
+                                  new_flow_tunnels)
+        || ed_non_vif_data->use_flow_based_tunnels
+               != new_use_flow_based_tunnels;
+
+    /* Swap in the freshly computed data and free the old one. */
+    simap_swap(&ed_non_vif_data->patch_ofports, &new_patch_ofports);
+    hmap_swap(&ed_non_vif_data->chassis_tunnels, &new_chassis_tunnels);
+    for (size_t i = 0; i < TUNNEL_TYPE_MAX; i++) {
+        struct flow_based_tunnel tmp = ed_non_vif_data->flow_tunnels[i];
+        ed_non_vif_data->flow_tunnels[i] = new_flow_tunnels[i];
+        new_flow_tunnels[i] = tmp;
+    }
+
+    simap_destroy(&new_patch_ofports);
+    chassis_tunnels_destroy(&new_chassis_tunnels);
+    flow_based_tunnels_destroy(new_flow_tunnels);
+
+    ed_non_vif_data->use_flow_based_tunnels = new_use_flow_based_tunnels;
+
+    if (ed_non_vif_data->trk_changes.patch_ofports_changed
+        || ed_non_vif_data->trk_changes.chassis_tunnels_changed
+        || ed_non_vif_data->trk_changes.flow_tunnels_changed) {
+        return EN_UPDATED;
+    }
+
+    return EN_UNCHANGED;
 }
 
 static enum engine_input_handler_result
@@ -4620,6 +4672,27 @@ lflow_output_sb_meter_handler(struct engine_node *node, void *data)
                                                     iter->name)) {
             return EN_HANDLED_UPDATED;
         }
+    }
+
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* lflow_output consumes only the 'chassis_tunnels' map from non_vif_data
+ * (via the tunnel_ofport() expression callback).  The 'patch_ofports',
+ * 'flow_tunnels' and 'use_flow_based_tunnels' pieces are only relevant to
+ * pflow_output.  So an update to non_vif_data that leaves the chassis
+ * tunnels untouched does not affect any logical flow and can be skipped.
+ * When the chassis tunnels do change we lack per-lflow dependency tracking
+ * for tunnel references, so we fall back to a full recompute. */
+static enum engine_input_handler_result
+lflow_output_non_vif_data_handler(struct engine_node *node,
+                                  void *data OVS_UNUSED)
+{
+    struct ed_type_non_vif_data *non_vif_data =
+        engine_get_input_data("non_vif_data", node);
+
+    if (non_vif_data->trk_changes.chassis_tunnels_changed) {
+        return EN_UNHANDLED;
     }
 
     return EN_HANDLED_UNCHANGED;
@@ -6922,7 +6995,7 @@ static ENGINE_NODE(template_vars, CLEAR_TRACKED_DATA);
 static ENGINE_NODE(ct_zones, CLEAR_TRACKED_DATA, IS_VALID);
 static ENGINE_NODE(ovs_interface_shadow, CLEAR_TRACKED_DATA);
 static ENGINE_NODE(runtime_data, CLEAR_TRACKED_DATA, SB_WRITE);
-static ENGINE_NODE(non_vif_data);
+static ENGINE_NODE(non_vif_data, CLEAR_TRACKED_DATA);
 static ENGINE_NODE(mff_ovn_geneve);
 static ENGINE_NODE(ofctrl_is_connected);
 static ENGINE_NODE(activated_ports, CLEAR_TRACKED_DATA);
@@ -7094,7 +7167,7 @@ inc_proc_ovn_controller_init(
     engine_add_input(&en_lflow_output, &en_runtime_data,
                      lflow_output_runtime_data_handler);
     engine_add_input(&en_lflow_output, &en_non_vif_data,
-                     NULL);
+                     lflow_output_non_vif_data_handler);
 
     engine_add_input(&en_lflow_output, &en_sb_multicast_group,
                      lflow_output_sb_multicast_group_handler);

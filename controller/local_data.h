@@ -179,9 +179,13 @@ bool get_chassis_tunnel_ofport(const struct hmap *chassis_tunnels,
 
 void chassis_tunnels_destroy(struct hmap *chassis_tunnels);
 
+bool chassis_tunnels_equal(const struct hmap *a, const struct hmap *b);
+
 /* Flow-based tunnel management functions. */
 void flow_based_tunnels_init(struct flow_based_tunnel *);
 void flow_based_tunnels_destroy(struct flow_based_tunnel *);
+bool flow_based_tunnels_equal(const struct flow_based_tunnel *,
+                              const struct flow_based_tunnel *);
 ofp_port_t get_flow_based_tunnel_port(
     enum chassis_tunnel_type, const struct flow_based_tunnel *);
 
