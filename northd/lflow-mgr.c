@@ -785,7 +785,17 @@ lflow_table_add_lflow__(struct lflow_table *lflow_table,
 
         if (!lrn->linked) {
             if (lrn->dpgrp_lflow) {
-                ovs_assert(lrn->dpgrp_bitmap_len == dp_bitmap_len);
+                /* The total number of datapaths of this type may have changed
+                 * (e.g. a datapath was added or removed via incremental
+                 * processing) since this ref node was created, changing the
+                 * datapath-group bitmap length.  Re-clone the recorded bitmap
+                 * at the current length so that a subsequent unlink releases
+                 * exactly the datapath refcounts this ref acquired here. */
+                if (lrn->dpgrp_bitmap_len != dp_bitmap_len) {
+                    bitmap_free(lrn->dpgrp_bitmap);
+                    lrn->dpgrp_bitmap = bitmap_clone(dp_bitmap, dp_bitmap_len);
+                    lrn->dpgrp_bitmap_len = dp_bitmap_len;
+                }
                 size_t index;
                 BITMAP_FOR_EACH_1 (index, dp_bitmap_len, dp_bitmap) {
                     /* Allocate a reference counter only if already used. */
