@@ -12266,6 +12266,122 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP incremental processing of router port addresses])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl --wait=sb lsp-add ls0 ls0-lr0 \
+    -- lsp-set-type ls0-lr0 router \
+    -- lsp-set-options ls0-lr0 router-port=lr0-ls0 \
+    -- lsp-set-addresses ls0-lr0 unknown
+
+# While the port carries "unknown" it gets no ARP/ND responder flows, unknown
+# destinations are flooded and Port_Binding.mac mirrors the NB column.
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(outport = "_MC_unknown"; output;)
+])
+AT_CHECK([ovn-sbctl --bare --columns=mac list port_binding ls0-lr0], [0], [dnl
+unknown
+])
+
+# "unknown" -> "router": the peer LRP networks are pulled into the port's
+# addresses, so the ARP/ND responder flows appear, od->has_unknown drops and the
+# port binding is resynced.  All of it without a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses ls0-lr0 router
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(arp.tpa == 192.168.0.1 && arp.op == 1 && eth.dst == ff:ff:ff:ff:ff:ff && inport == "ls0-lr0"), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(nd_ns_mcast && ip6.dst == ff02::1:ff00:ff01 && nd.target == fe80::200:ff:fe00:ff01 && inport == "ls0-lr0"), action=(next;)
+  table=??(ls_in_arp_rsp      ), priority=50   , match=(arp.tpa == 192.168.0.1 && arp.op == 1 && eth.dst == ff:ff:ff:ff:ff:ff), action=(eth.dst = eth.src; eth.src = 00:00:00:00:ff:01; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = 00:00:00:00:ff:01; arp.tpa = arp.spa; arp.spa = 192.168.0.1; outport = inport; flags.loopback = 1; output;)
+  table=??(ls_in_arp_rsp      ), priority=50   , match=(nd_ns_mcast && ip6.dst == ff02::1:ff00:ff01 && nd.target == fe80::200:ff:fe00:ff01), action=(nd_na_router { eth.src = 00:00:00:00:ff:01; ip6.src = fe80::200:ff:fe00:ff01; nd.target = fe80::200:ff:fe00:ff01; nd.tll = 00:00:00:00:ff:01; outport = inport; flags.loopback = 1; output; };)
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(drop;)
+])
+AT_CHECK([ovn-sbctl --bare --columns=mac list port_binding ls0-lr0], [0], [dnl
+router
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# "router" -> "router unknown": the responder flows stay, od->has_unknown is
+# raised again.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses ls0-lr0 router unknown
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(outport = "_MC_unknown"; output;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Back to "unknown" only: the responder flows are withdrawn again.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses ls0-lr0 unknown
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=0    , match=(1), action=(next;)
+])
+AT_CHECK([ovn-sbctl --bare --columns=mac list port_binding ls0-lr0], [0], [dnl
+unknown
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# An external LSP on the same switch derives S_SWITCH_IN_EXTERNAL_PORT flows
+# from the router port's addresses but owns them through its own lflow_ref, so
+# the change must fall back to a recompute.
+check ovn-nbctl --wait=sb lsp-add ls0 extp \
+    -- lsp-set-type extp external \
+    -- lsp-set-addresses extp "aa:aa:aa:00:00:07 192.168.0.7"
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses ls0-lr0 router
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check ovn-nbctl --wait=sb lsp-del extp
+
+# arp_proxy addresses are parsed by join_logical_ports() only and feed flows
+# owned by the peer LRP's lflow_ref, so the change must fall back too.
+check ovn-nbctl --wait=sb lsp-set-options ls0-lr0 \
+    router-port=lr0-ls0 arp_proxy=192.168.0.100
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses ls0-lr0 unknown
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
 AT_SETUP([Virtual port incremental processing])
 AT_KEYWORDS([incremental processing])
 ovn_start

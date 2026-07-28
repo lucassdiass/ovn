@@ -4923,6 +4923,37 @@ router_lsp_needs_recompute(struct ovn_datapath *od,
     return false;
 }
 
+/* An "addresses"-only change on a logical switch port of type "router" can be
+ * reprocessed in place, but the port's parsed addresses are also read while
+ * building flows owned by other lflow_refs, which that path does not
+ * regenerate.  Return true when any such reader is present, so the caller
+ * falls back to a full recompute.  The known readers are:
+ *
+ *  - An external LSP on the same switch: build_lswitch_external_port() derives
+ *    S_SWITCH_IN_EXTERNAL_PORT drop flows from every router port's addresses,
+ *    but owns them through the *external* port's lflow_ref.
+ *
+ *  - arp_proxy on this port: the proxy-arp addresses are parsed by
+ *    join_logical_ports() only (not by parse_lsp_addrs()) and feed admission
+ *    flows owned by the peer LRP's lflow_ref. */
+static bool
+router_lsp_addrs_change_needs_recompute(
+    struct ovn_datapath *od, const struct nbrec_logical_switch_port *nbsp)
+{
+    if (smap_get(&nbsp->options, "arp_proxy")) {
+        return true;
+    }
+
+    struct ovn_port *op;
+    HMAP_FOR_EACH (op, dp_node, &od->ports) {
+        if (lsp_is_external(op->nbsp)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /* Wire the peer relationship of a logical switch port 'op' of type "router",
  * mirroring the router branch of join_logical_ports().  'op->od' must be set.
  * Must run before the SB port binding is synced, as ovn_port_update_sbrec()
@@ -5115,6 +5146,42 @@ ls_port_reinit(struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
     return ls_port_init(op, ovnsb_txn, od, sb, sbrec_mirror_table,
                         sbrec_chassis_by_name, sbrec_chassis_by_hostname,
                         sbrec_encap_by_ip);
+}
+
+/* Reprocess an "addresses"-only change on a logical switch port of type
+ * "router".  Only the parsed address state is re-derived; the tunnel key, the
+ * SB port binding row and the peer wiring (which depends on
+ * options:router-port, not on the addresses) are kept in place.
+ *
+ * ls_port_reinit() can't be used here: its ovn_port_cleanup() would clear the
+ * reverse peer->peer pointer, and re-wiring the peer on reinit is not
+ * supported. */
+static void
+ls_router_port_handle_addrs_change(
+    struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
+    const struct sbrec_mirror_table *sbrec_mirror_table,
+    struct ovsdb_idl_index *sbrec_chassis_by_name,
+    struct ovsdb_idl_index *sbrec_chassis_by_hostname,
+    struct ovsdb_idl_index *sbrec_encap_by_ip)
+{
+    for (size_t i = 0; i < op->n_lsp_addrs; i++) {
+        destroy_lport_addresses(&op->lsp_addrs[i]);
+    }
+    free(op->lsp_addrs);
+    op->n_lsp_addrs = 0;
+    op->lsp_addrs = NULL;
+    op->lsp_has_port_sec = false;
+
+    parse_lsp_addrs(op);
+    if (op->peer) {
+        ls_router_port_add_peer_networks(op);
+    }
+
+    /* Port_Binding.mac mirrors NB "addresses" for every LSP, router-type
+     * included, so the SB row has to be resynced. */
+    ovn_port_update_sbrec(ovnsb_txn, sbrec_chassis_by_name,
+                          sbrec_chassis_by_hostname, NULL, sbrec_mirror_table,
+                          sbrec_encap_by_ip, op, NULL, NULL);
 }
 
 /* Find the logical router port 'nbrp' among the ports of the logical router
@@ -5385,15 +5452,23 @@ ls_changes_can_be_handled(
 }
 
 static bool
-check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
+check_lsp_changes_other_than_up__(
+    const struct nbrec_logical_switch_port *nbsp, bool ignore_addresses)
 {
     /* Check if the columns are changed in this row. */
     enum nbrec_logical_switch_port_column_id col;
     for (col = 0; col < NBREC_LOGICAL_SWITCH_PORT_N_COLUMNS; col++) {
-        if (nbrec_logical_switch_port_is_updated(nbsp, col) &&
-            col != NBREC_LOGICAL_SWITCH_PORT_COL_UP) {
-            return true;
+        if (!nbrec_logical_switch_port_is_updated(nbsp, col)) {
+            continue;
         }
+        if (col == NBREC_LOGICAL_SWITCH_PORT_COL_UP) {
+            continue;
+        }
+        if (ignore_addresses &&
+            col == NBREC_LOGICAL_SWITCH_PORT_COL_ADDRESSES) {
+            continue;
+        }
+        return true;
     }
 
     /* Check if the referenced rows are changed.
@@ -5420,6 +5495,22 @@ check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
         }
     }
     return false;
+}
+
+static bool
+check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
+{
+    return check_lsp_changes_other_than_up__(nbsp, false);
+}
+
+/* Like check_lsp_changes_other_than_up(), but also ignores a change to the
+ * "addresses" column, which ls_router_port_handle_addrs_change() reprocesses
+ * in place for a port of type "router". */
+static bool
+check_lsp_changes_other_than_up_and_addrs(
+    const struct nbrec_logical_switch_port *nbsp)
+{
+    return check_lsp_changes_other_than_up__(nbsp, true);
 }
 
 static bool
@@ -5588,13 +5679,29 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                      * "l3gateway", ...) never matches its NB type ("router"),
                      * so lsp_is_type_changed() can't be used here.  Re-wiring
                      * the peer relationship on reinit is not supported, so
-                     * fall back to recompute on any change other than the "up"
-                     * column; an "up"-only change does not affect router-port
-                     * flows, so ignore it. */
+                     * fall back to recompute on any change other than the
+                     * "up" and "addresses" columns; an "up"-only change does
+                     * not affect router-port flows, so ignore it. */
                     if (!op->lsp_can_be_inc_processed ||
                         !lsp_can_be_inc_processed(new_nbsp) ||
-                        check_lsp_changes_other_than_up(new_nbsp)) {
+                        check_lsp_changes_other_than_up_and_addrs(new_nbsp)) {
                         goto fail;
+                    }
+                    if (nbrec_logical_switch_port_is_updated(
+                            new_nbsp,
+                            NBREC_LOGICAL_SWITCH_PORT_COL_ADDRESSES)) {
+                        if (router_lsp_addrs_change_needs_recompute(
+                                od, new_nbsp) ||
+                            sset_contains(&nd->svc_monitor_lsps,
+                                          new_nbsp->name)) {
+                            goto fail;
+                        }
+                        ls_router_port_handle_addrs_change(
+                            op, ovnsb_idl_txn, ni->sbrec_mirror_table,
+                            ni->sbrec_chassis_by_name,
+                            ni->sbrec_chassis_by_hostname,
+                            ni->sbrec_encap_by_ip);
+                        add_op_to_northd_tracked_ports(&trk_lsps->updated, op);
                     }
                     op->visited = true;
                     continue;
