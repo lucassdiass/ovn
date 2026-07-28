@@ -1541,6 +1541,10 @@ parse_lsp_addrs(struct ovn_port *op)
 {
     const struct nbrec_logical_switch_port *nbsp = op->nbsp;
     ovs_assert(nbsp);
+    /* Recomputed from scratch below; 'op' may be an existing port being
+     * reinitialized by the incremental path (see ls_port_reinit()), in which
+     * case the previous value must not leak through. */
+    op->has_unknown = false;
     op->lsp_addrs
         = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
     for (size_t j = 0; j < nbsp->n_addresses; j++) {
@@ -4764,12 +4768,6 @@ lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *nbsp)
             nbsp->dynamic_addresses) {
             return false;
         }
-        /* "unknown" address handling is not supported for now.  XXX: Need to
-         * handle od->has_unknown change and track it when the first LSP with
-         * 'unknown' is added or when the last one is removed. */
-        if (!strcmp(nbsp->addresses[j], "unknown")) {
-            return false;
-        }
     }
 
     /* Attaching lport mirror is not supported for now. */
@@ -5471,6 +5469,32 @@ lsp_handle_health_check_changes(const struct ovn_port *op)
         NBREC_LOGICAL_SWITCH_PORT_COL_HEALTH_CHECKS);
 }
 
+/* Recompute 'od->has_unknown' from the logical switch's current set of ports.
+ * The full recompute path (join_logical_ports_lsp()) only ever raises the flag
+ * because it starts from a freshly allocated datapath; the incremental path
+ * must also lower it again when the last port with an "unknown" address goes
+ * away.  Returns true if the value changed. */
+static bool
+ls_update_has_unknown(struct ovn_datapath *od)
+{
+    bool has_unknown = false;
+    struct ovn_port *op;
+
+    HMAP_FOR_EACH (op, dp_node, &od->ports) {
+        if (op->has_unknown) {
+            has_unknown = true;
+            break;
+        }
+    }
+
+    if (od->has_unknown == has_unknown) {
+        return false;
+    }
+
+    od->has_unknown = has_unknown;
+    return true;
+}
+
 /* Handles logical switch port changes of a changed logical switch.
  * Returns false, if any logical port can't be incrementally handled.
  */
@@ -5694,6 +5718,30 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 /* This port was used as target/source mirror port,
                  * fallback to recompute. */
                 goto fail;
+            }
+        }
+    }
+
+    /* 'od->has_unknown' aggregates the "unknown" addresses of all the ports of
+     * the switch, so adding, updating or deleting a port may toggle it.  When
+     * it does, two sets of flows outside the changed port's own 'lflow_ref'
+     * must be regenerated:
+     *
+     *  - The switch's L2_UNKNOWN flows, owned by 'od->datapath_lflows' (see
+     *    build_lswitch_lflows_l2_unknown() and its EVPN variant).  Tracking
+     *    the switch as crupdated makes the lflow engine rebuild that ref.
+     *
+     *  - The unicast lookup flow of any sibling port with
+     *    options:pkt_clone_type=mc_unknown, owned by that port's own
+     *    'lflow_ref' (see build_lswitch_ip_unicast_lookup()).  Newly created
+     *    ports already get their flows generated, so skip those. */
+    if (!ls_deleted && ls_update_has_unknown(od)) {
+        hmapx_add(&nd->trk_data.trk_switches.crupdated, od);
+
+        HMAP_FOR_EACH (op, dp_node, &od->ports) {
+            if (lsp_is_clone_to_unknown(op->nbsp) &&
+                !hmapx_contains(&trk_lsps->created, op)) {
+                add_op_to_northd_tracked_ports(&trk_lsps->updated, op);
             }
         }
     }

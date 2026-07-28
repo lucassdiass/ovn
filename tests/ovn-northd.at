@@ -11938,7 +11938,7 @@ check ovn-nbctl --wait=hv lsp-add ls0 lsp0-0 -- lsp-set-addresses lsp0-0 "unknow
 ovs-vsctl add-port br-int lsp0-0 -- set interface lsp0-0 external_ids:iface-id=lsp0-0
 wait_for_ports_up
 check ovn-nbctl --wait=hv sync
-check_recompute_counter 3 4 3 4 3 4
+check_recompute_counter 0 0 0 0 0 0
 
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=hv lsp-add ls0 lsp0-1 -- lsp-set-addresses lsp0-1 "aa:aa:aa:00:00:01 192.168.0.11"
@@ -12126,9 +12126,11 @@ for i in $(seq $n); do
     ovs-vsctl add-port br-int lsp0-$i -- set interface lsp0-$i external_ids:iface-id=lsp0-$i
 done
 
-# Add a port that should not be incrementally processed (because of the
-# "unknown" that is not supported by i-p for now).
-check ovn-nbctl --wait=hv lsp-add ls0 lsp0-foo -- lsp-set-addresses lsp0-foo "unknown"
+# Add a port that should not be incrementally processed (because of the QoS
+# options that are not supported by i-p for now).
+check ovn-nbctl --wait=hv lsp-add ls0 lsp0-foo \
+    -- lsp-set-addresses lsp0-foo "aa:aa:aa:00:00:ff 192.168.0.99" \
+    -- lsp-set-options lsp0-foo qos_max_rate=200000
 ovs-vsctl add-port br-int lsp0-foo -- set interface lsp0-foo external_ids:iface-id=lsp0-foo
 
 wait_for_ports_up
@@ -12153,6 +12155,114 @@ AT_CHECK([test $northd_recomp -ge 1])
 OVN_CLEANUP([hv1
 ignored_dp=ls0
 ])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP incremental processing of "unknown" addresses])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lsp-add ls0 lsp0 \
+    -- lsp-set-addresses lsp0 "aa:aa:aa:00:00:01 192.168.0.11" \
+    -- lsp-set-options lsp0 pkt_clone_type=mc_unknown
+
+# With no port holding an "unknown" address, unknown destinations are dropped
+# and lsp0 is not cloned to the MC_UNKNOWN group.
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(drop;)
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_lkup | \
+    grep 'aa:aa:aa:00:00:01' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_lkup      ), priority=50   , match=(eth.dst == aa:aa:aa:00:00:01), action=(outport = "lsp0"; output;)
+])
+
+# Adding the first port with an "unknown" address raises od->has_unknown.  The
+# switch's L2_UNKNOWN flows and the clone-to-unknown flow of the sibling port
+# must be regenerated without falling back to a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add ls0 lsp-unknown \
+    -- lsp-set-addresses lsp-unknown "unknown"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(outport = "_MC_unknown"; output;)
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_lkup | \
+    grep 'aa:aa:aa:00:00:01' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_lkup      ), priority=50   , match=(eth.dst == aa:aa:aa:00:00:01), action=(clone {outport = "lsp0"; output; };outport = "_MC_unknown"; output;)
+])
+
+# lsp-unknown joins the MC_UNKNOWN multicast group.
+mc_ports=$(ovn-sbctl --bare --columns=ports find multicast_group \
+    name=_MC_unknown)
+AT_CHECK([ovn-sbctl --bare --columns=logical_port list port_binding \
+    $mc_ports], [0], [dnl
+lsp-unknown
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Dropping the "unknown" address of a port lowers od->has_unknown again.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses lsp-unknown \
+    "aa:aa:aa:00:00:02 192.168.0.12"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(drop;)
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_lkup | \
+    grep 'aa:aa:aa:00:00:01' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_lkup      ), priority=50   , match=(eth.dst == aa:aa:aa:00:00:01), action=(outport = "lsp0"; output;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Two ports with "unknown": deleting one of them must keep od->has_unknown set.
+check ovn-nbctl --wait=sb lsp-add ls0 lsp-unknown1 \
+    -- lsp-set-addresses lsp-unknown1 "unknown"
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add ls0 lsp-unknown2 \
+    -- lsp-set-addresses lsp-unknown2 "unknown"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del lsp-unknown2
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(outport = "_MC_unknown"; output;)
+])
+
+# Deleting the last one lowers it.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del lsp-unknown1
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_unknown | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_unknown   ), priority=0    , match=(1), action=(output;)
+  table=??(ls_in_l2_unknown   ), priority=50   , match=(outport == "none"), action=(drop;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 
