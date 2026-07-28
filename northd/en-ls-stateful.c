@@ -152,15 +152,21 @@ ls_stateful_northd_handler(struct engine_node *node, void *data_)
     struct ed_type_ls_stateful *data = data_;
     struct hmapx_node *hmapx_node;
 
+    /* A switch northd tracks as crupdated is either new or had a datapath-wide
+     * property change (its set of router ports, its "unknown" addresses, ...)
+     * that the flows of its ls_stateful record may depend on too, e.g. the
+     * skip-conntrack flows of its router ports.  Either way the record's flows
+     * have to be regenerated. */
     HMAPX_FOR_EACH (hmapx_node, &nd_changes->trk_switches.crupdated) {
         const struct ovn_datapath *od = hmapx_node->data;
 
-        if (!ls_stateful_table_find_(&data->table, od->nbs)) {
-            struct ls_stateful_record *ls_stateful_rec =
-                ls_stateful_record_create(&data->table, od,
-                                          input_data.ls_port_groups);
-            hmapx_add(&data->trk_data.crupdated, ls_stateful_rec);
+        struct ls_stateful_record *ls_stateful_rec =
+            ls_stateful_table_find_(&data->table, od->nbs);
+        if (!ls_stateful_rec) {
+            ls_stateful_rec = ls_stateful_record_create(
+                &data->table, od, input_data.ls_port_groups);
         }
+        hmapx_add(&data->trk_data.crupdated, ls_stateful_rec);
     }
 
     HMAPX_FOR_EACH (hmapx_node, &nd_changes->ls_with_changed_lbs) {
