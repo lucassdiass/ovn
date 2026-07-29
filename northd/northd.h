@@ -952,6 +952,21 @@ bool northd_handle_ls_changes(struct ovsdb_idl_txn *,
 bool northd_handle_lr_changes(struct ovsdb_idl_txn *,
                               const struct northd_input *,
                               struct northd_data *);
+/* This function returns true if 'op' is a chassis resident
+ * derived port. False otherwise.
+ * There are 2 ways to check if 'op' is chassis resident port.
+ *  1. op->sb->type is "chassisredirect"
+ *  2. op->primary_port is not NULL.  If op->primary_port is set,
+ *     it means 'op' is derived from the ovn_port op->primary_port.
+ *
+ * This function uses the (2) method as it doesn't involve strcmp().
+ */
+static inline bool
+is_cr_port(const struct ovn_port *op)
+{
+    return op->primary_port;
+}
+
 bool northd_handle_pgs_acl_changes(const struct northd_input *ni,
                                    struct northd_data *nd);
 void northd_sync_ha_chassis_groups(

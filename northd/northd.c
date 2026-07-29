@@ -1017,21 +1017,6 @@ build_datapaths(const struct ovn_synced_logical_switch_map *ls_map,
 
 static bool lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *);
 
-/* This function returns true if 'op' is a chassis resident
- * derived port. False otherwise.
- * There are 2 ways to check if 'op' is chassis resident port.
- *  1. op->sb->type is "chassisredirect"
- *  2. op->primary_port is not NULL.  If op->primary_port is set,
- *     it means 'op' is derived from the ovn_port op->primary_port.
- *
- * This function uses the (2) method as it doesn't involve strcmp().
- */
-static bool
-is_cr_port(const struct ovn_port *op)
-{
-    return op->primary_port;
-}
-
 /* This function returns true if 'op' is a router port that has as
  * requested chassis a remote chassis, i.e., if 'op' is a transit router
  * port. */
@@ -6496,11 +6481,269 @@ is_lr_static_routes_changed(const struct nbrec_logical_router *nbr)
            || is_lr_static_routes_seqno_changed(nbr);
 }
 
+/* Return true if any column of 'nbrp' other than "gateway_chassis" and
+ * "ha_chassis_group" changed. */
+static bool
+check_lrp_changes_other_than_gateway(
+    const struct nbrec_logical_router_port *nbrp)
+{
+    enum nbrec_logical_router_port_column_id col;
+    for (col = 0; col < NBREC_LOGICAL_ROUTER_PORT_N_COLUMNS; col++) {
+        if (!nbrec_logical_router_port_is_updated(nbrp, col)) {
+            continue;
+        }
+        if (col == NBREC_LOGICAL_ROUTER_PORT_COL_GATEWAY_CHASSIS ||
+            col == NBREC_LOGICAL_ROUTER_PORT_COL_HA_CHASSIS_GROUP) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* A logical router port that gains "gateway_chassis" or "ha_chassis_group"
+ * becomes a distributed gateway port (DGP), which a full recompute turns into
+ * a chassisredirect port plus an entry in od->l3dgw_ports.  Return true when
+ * that transition pulls in a dependency this incremental path does not keep in
+ * sync, so the caller falls back to a full recompute. */
+static bool
+lrp_becomes_dgp_needs_recompute(
+    struct ovn_datapath *od, const struct ovn_port *op,
+    const struct nbrec_logical_router_port *nbrp,
+    const struct northd_data *nd,
+    const struct nbrec_static_mac_binding_table *nb_smb_table)
+{
+    /* Only the first DGP of a router is handled: with more than one, the DGPs
+     * generate flows for each other, and peer_needs_cr_port_creation() stops
+     * deriving a cr-port from the peer switch port. */
+    if (op->cr_port || !vector_is_empty(&od->l3dgw_ports)) {
+        return true;
+    }
+
+    /* join_logical_ports_lrp() rejects a DGP on an L3 gateway router. */
+    if (od->is_gw_router || smap_get(&od->nbr->options, "chassis")) {
+        return true;
+    }
+
+    /* The cr-port shares the LRP's NB row, so it would request the same tunnel
+     * key and conflict with it. */
+    if (smap_get_int(&nbrp->options, "requested-tnl-key", 0)) {
+        return true;
+    }
+
+    /* The same per-port and per-router restrictions the create/delete path
+     * applies (see lrp_needs_recompute()), minus the gateway columns this
+     * transition is about and minus od->l3dgw_ports, checked above. */
+    const struct nbrec_static_mac_binding *nb_smb;
+    NBREC_STATIC_MAC_BINDING_TABLE_FOR_EACH (nb_smb, nb_smb_table) {
+        if (!strcmp(nb_smb->logical_port, nbrp->name)) {
+            return true;
+        }
+    }
+    if (nbrp->peer || !lrport_is_enabled(nbrp) ||
+        smap_get_bool(&nbrp->options, "prefix_delegation", false) ||
+        smap_get(&nbrp->options, "redirect-type") ||
+        smap_get(&nbrp->options, "route_table") ||
+        !smap_is_empty(&nbrp->ipv6_ra_configs)) {
+        return true;
+    }
+
+    const struct nbrec_logical_router *nbr = od->nbr;
+    if (nbr->n_nat || nbr->n_static_routes || nbr->n_policies ||
+        nbr->n_load_balancer || nbr->n_load_balancer_group ||
+        od->dynamic_routing ||
+        od->dynamic_routing_redistribute != DRRM_NONE ||
+        od->mcast_info.rtr.relay) {
+        return true;
+    }
+
+    /* lr_port_make_dgp() has to record a multi-chassis HA chassis group in the
+     * router group's 'ha_chassis_groups', which en_sync_from_sb needs to build
+     * the group's 'ref_chassis'.  Only a recompute builds router groups, so a
+     * router created incrementally has nowhere to record it. */
+    if (!od->lr_group &&
+        (nbrp->ha_chassis_group ? nbrp->ha_chassis_group->n_ha_chassis
+                                : nbrp->n_gateway_chassis) > 1) {
+        return true;
+    }
+
+    /* A stale ovn_port already holds the chassisredirect name; let recompute
+     * reconcile it. */
+    char *redirect_name = ovn_chassis_redirect_name(nbrp->name);
+    bool taken = ovn_port_find(&nd->lr_ports, redirect_name);
+    free(redirect_name);
+    if (taken) {
+        return true;
+    }
+
+    if (op->peer && op->peer->nbsp) {
+        /* Turning the peer switch port into the peer of a DGP changes flows
+         * owned by the peer switch's ls_stateful lflow_ref and by the load
+         * balancer install set. */
+        const struct nbrec_logical_switch *peer_nbs = op->peer->od->nbs;
+        if (peer_nbs->n_acls || peer_nbs->n_load_balancer ||
+            peer_nbs->n_load_balancer_group) {
+            return true;
+        }
+
+        redirect_name = ovn_chassis_redirect_name(op->peer->nbsp->name);
+        taken = ovn_port_find(&nd->ls_ports, redirect_name);
+        free(redirect_name);
+        if (taken) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/* Create the chassisredirect port derived from 'op' -- either a distributed
+ * gateway port or the switch port peering with one -- the way create_cr_port()
+ * does during a full recompute, and give it a tunnel key and an SB port
+ * binding.  Returns NULL on failure. */
+static struct ovn_port *
+cr_port_create(struct ovsdb_idl_txn *ovnsb_txn, struct hmap *ports,
+               struct ovn_port *op)
+{
+    char *redirect_name = ovn_chassis_redirect_name(
+        op->nbsp ? op->nbsp->name : op->nbrp->name);
+    struct ovn_port *crp = ovn_port_create(ports, redirect_name, op->nbsp,
+                                           op->nbrp, NULL);
+    free(redirect_name);
+
+    /* A cr-port is not inserted into od->ports; it is reached through
+     * op->cr_port and od->l3dgw_ports, exactly as create_cr_port() leaves
+     * it. */
+    crp->primary_port = op;
+    op->cr_port = crp;
+    crp->od = op->od;
+
+    if (!ovn_port_allocate_key(crp)) {
+        op->cr_port = NULL;
+        ovn_port_destroy(ports, crp);
+        return NULL;
+    }
+
+    crp->sb = sbrec_port_binding_insert(ovnsb_txn);
+    sbrec_port_binding_set_logical_port(crp->sb, crp->key);
+
+    return crp;
+}
+
+/* Turn the existing regular logical router port 'op' into a distributed
+ * gateway port, mirroring what join_logical_ports() does for one during a full
+ * recompute: derive its chassisredirect port, record the DGP in
+ * od->l3dgw_ports and, when the peer switch port qualifies, derive a
+ * chassisredirect port from that one too.  Everything whose flows start
+ * depending on the router having a DGP is tracked.  Returns false on
+ * failure. */
+static bool
+lr_port_make_dgp(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                 const struct northd_input *ni, struct northd_data *nd,
+                 struct ovn_datapath *od, struct ovn_port *op,
+                 struct tracked_ovn_ports *trk_lrps)
+{
+    /* Only ever grows here (a DGP is being added), so the stale-group cleanup
+     * that build_ports() does with this set has nothing to do.  The SB
+     * HA_Chassis_Group change handler re-runs it anyway. */
+    struct sset active_ha_chassis_grps =
+        SSET_INITIALIZER(&active_ha_chassis_grps);
+    bool ok = false;
+
+    struct ovn_port *crp = cr_port_create(ovnsb_idl_txn, &nd->lr_ports, op);
+    if (!crp) {
+        goto out;
+    }
+
+    /* Must precede peer_needs_cr_port_creation(), which requires the router to
+     * have exactly one DGP. */
+    vector_push(&od->l3dgw_ports, &op);
+
+    if (op->peer && op->peer->nbsp) {
+        /* Only used for the router type LSP whose peer is l3dgw_port. */
+        op->peer->enable_router_port_acl = smap_get_bool(
+            &op->peer->nbsp->options, "enable_router_port_acl", false);
+    }
+
+    /* This cr-port's port binding owns the HA chassis group, so it has to be
+     * synced before the one derived from the peer switch port, which mirrors
+     * its 'ha_chassis_group' column. */
+    ovn_port_update_sbrec(ovnsb_idl_txn, ni->sbrec_chassis_by_name,
+                          ni->sbrec_chassis_by_hostname,
+                          ni->sbrec_ha_chassis_grp_by_name,
+                          ni->sbrec_mirror_table, ni->sbrec_encap_by_ip,
+                          crp, NULL, &active_ha_chassis_grps);
+    add_op_to_northd_tracked_ports(&trk_lrps->created, crp);
+
+    /* What build_lrouter_groups__() derives from the cr-port's port binding
+     * during a recompute.  en_sync_from_sb reads this set to build the HA
+     * chassis group's 'ref_chassis'; without it the group would keep an empty
+     * 'ref_chassis' until something else forces a recompute. */
+    if (crp->sb->ha_chassis_group &&
+        crp->sb->ha_chassis_group->n_ha_chassis > 1) {
+        /* Guaranteed by lrp_becomes_dgp_needs_recompute(). */
+        ovs_assert(od->lr_group);
+        sset_add(&od->lr_group->ha_chassis_groups,
+                 crp->sb->ha_chassis_group->name);
+    }
+
+    if (peer_needs_cr_port_creation(op)) {
+        struct ovn_port *peer_crp = cr_port_create(ovnsb_idl_txn,
+                                                   &nd->ls_ports, op->peer);
+        if (!peer_crp) {
+            goto out;
+        }
+        ovn_port_update_sbrec(ovnsb_idl_txn, ni->sbrec_chassis_by_name,
+                              ni->sbrec_chassis_by_hostname,
+                              ni->sbrec_ha_chassis_grp_by_name,
+                              ni->sbrec_mirror_table, ni->sbrec_encap_by_ip,
+                              peer_crp, NULL, &active_ha_chassis_grps);
+        add_op_to_northd_tracked_ports(&nd->trk_data.trk_lsps.created,
+                                       peer_crp);
+    }
+
+    /* The DGP gains admission, ip-input and neighbor-lookup flows keyed on
+     * is_chassis_resident() of its cr-port, owned by its own lflow_ref. */
+    add_op_to_northd_tracked_ports(&trk_lrps->updated, op);
+
+    /* The gateway-redirect flows are built per router datapath by iterating
+     * od->l3dgw_ports and are owned by od->datapath_lflows. */
+    hmapx_add(&nd->trk_data.trk_routers.crupdated, od);
+
+    /* The router's other ports lose the "port unreachable" flows that
+     * build_lrouter_ipv4_ip_input() and build_lrouter_ipv6_ip_input() only
+     * generate while the router has no distributed gateway port.  They are
+     * owned by each of those ports' own lflow_ref. */
+    struct ovn_port *rp;
+    HMAP_FOR_EACH (rp, dp_node, &od->ports) {
+        if (rp != op) {
+            add_op_to_northd_tracked_ports(&trk_lrps->updated, rp);
+        }
+    }
+
+    if (op->peer && op->peer->nbsp) {
+        /* The peer switch port's L2 lookup and admission flows now steer to
+         * the cr-port; they are owned by its own lflow_ref.  The switch's
+         * datapath-wide and ls_stateful flows iterate od->router_ports, whose
+         * DGP state changed. */
+        add_op_to_northd_tracked_ports(&nd->trk_data.trk_lsps.updated,
+                                       op->peer);
+        hmapx_add(&nd->trk_data.trk_switches.crupdated, op->peer->od);
+    }
+
+    ok = true;
+out:
+    sset_destroy(&active_ha_chassis_grps);
+    return ok;
+}
+
 /* Handles logical router port changes of a changed (created, updated or
  * deleted) logical router 'changed_lr' with datapath 'od'.  Regular
- * (non-gateway) LRPs are created and deleted incrementally; anything that
- * pulls in dependencies not tracked here (see lrp_needs_recompute()) or a
- * modification of an existing LRP falls back to a full recompute.
+ * (non-gateway) LRPs are created and deleted incrementally, and an existing
+ * one can become a distributed gateway port; anything that pulls in
+ * dependencies not tracked here (see lrp_needs_recompute() and
+ * lrp_becomes_dgp_needs_recompute()) or any other modification of an existing
+ * LRP falls back to a full recompute.
  *
  * Returns false if any port can't be incrementally handled. */
 static bool
@@ -6573,9 +6816,23 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 hmapx_add(&nd->trk_data.trk_routers.crupdated, od);
             } else if (nbrec_logical_router_port_row_get_seqno(
                            new_nbrp, OVSDB_IDL_CHANGE_MODIFY) > 0) {
-                /* Re-initializing an LRP (re-wiring its peer, networks, ...)
-                 * is not supported yet. */
-                goto fail;
+                /* The only modification handled in place is the port becoming
+                 * a distributed gateway port.  Re-initializing an LRP
+                 * (re-wiring its peer, networks, ...) is not supported. */
+                if (check_lrp_changes_other_than_gateway(new_nbrp) ||
+                    !(new_nbrp->n_gateway_chassis ||
+                      new_nbrp->ha_chassis_group)) {
+                    goto fail;
+                }
+                if (lrp_becomes_dgp_needs_recompute(
+                        od, op, new_nbrp, nd,
+                        ni->nbrec_static_mac_binding_table)) {
+                    goto fail;
+                }
+                if (!lr_port_make_dgp(ovnsb_idl_txn, ni, nd, od, op,
+                                      trk_lrps)) {
+                    goto fail;
+                }
             }
             op->visited = true;
         }
@@ -6775,6 +7032,7 @@ northd_handle_lr_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         nd->trk_data.type |= NORTHD_TRACKED_LR_ROUTES;
     }
     if (!hmapx_is_empty(&nd->trk_data.trk_lrps.created) ||
+        !hmapx_is_empty(&nd->trk_data.trk_lrps.updated) ||
         !hmapx_is_empty(&nd->trk_data.trk_lrps.deleted)) {
         nd->trk_data.type |= NORTHD_TRACKED_LR_PORTS;
     }

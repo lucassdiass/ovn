@@ -12791,12 +12791,16 @@ ovn_start
 
 check ovn-sbctl chassis-add gw1 geneve 127.0.0.1
 
-# Adding a distributed gateway port falls back to recompute (cr-port).
+# Creating a port that is already a distributed gateway port falls back to
+# recompute (cr-port).  Both changes go in a single transaction so that the
+# port is created with its gateway chassis already set; an existing port
+# *becoming* a distributed gateway port is processed incrementally instead.
 check ovn-nbctl --wait=sb lr-add lr0
 check ovn-nbctl ls-add public
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
-check ovn-nbctl lrp-add lr0 lr0-public 00:00:20:20:12:13 172.168.0.100/24
-check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-public gw1 20
+check ovn-nbctl --wait=sb \
+    lrp-add lr0 lr0-public 00:00:20:20:12:13 172.168.0.100/24 \
+    -- lrp-set-gateway-chassis lr0-public gw1 20
 check_engine_compute northd recompute
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
@@ -12828,6 +12832,207 @@ CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
 OVN_CLEANUP_NORTHD
 AT_CLEANUP
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LRP incremental processing of the distributed gateway transition])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-sbctl chassis-add hv1 geneve 10.0.0.1
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls0 ls0-lr0 lr0-ls0
+check ovn-nbctl --wait=sb lsp-add ls0 vif1 \
+    -- lsp-set-addresses vif1 "aa:aa:aa:00:00:01 192.168.0.11"
+
+AT_CHECK([ovn-sbctl --bare --columns=logical_port list port_binding | \
+    grep -c '^cr-'], [1], [0
+])
+
+# Giving the LRP a gateway chassis turns it into a distributed gateway port.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ls0 hv1 20
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb incremental
+
+# The chassisredirect port of the DGP is created, and so is the one derived
+# from the peer switch port (ls0 has no localnet port and lr0 has a single
+# DGP, see peer_needs_cr_port_creation()).
+AT_CHECK([ovn-sbctl --bare --columns=logical_port list port_binding | \
+    grep '^cr-' | sort], [0], [dnl
+cr-lr0-ls0
+cr-ls0-lr0
+])
+AT_CHECK([ovn-sbctl --bare --columns=type,options list port_binding \
+    cr-lr0-ls0], [0], [dnl
+chassisredirect
+always-redirect=true distributed-port=lr0-ls0
+])
+AT_CHECK([ovn-sbctl --bare --columns=type list port_binding cr-ls0-lr0], [0],
+[dnl
+chassisredirect
+])
+
+# The SB HA_Chassis_Group is derived from the NB gateway_chassis.
+AT_CHECK([ovn-sbctl --bare --columns=name list ha_chassis_group], [0], [dnl
+lr0-ls0
+])
+AT_CHECK([ovn-sbctl --bare --columns=priority list ha_chassis], [0], [dnl
+20
+])
+
+# Routing towards the DGP is redirected to its cr-port, and the DGP only
+# admits traffic on the chassis where the cr-port lives.
+AT_CHECK([ovn-sbctl dump-flows lr0 | grep gw_redirect | ovn_strip_lflows], [0],
+[dnl
+  table=??(lr_in_gw_redirect  ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_gw_redirect  ), priority=50   , match=(outport == "lr0-ls0"), action=(outport = "cr-lr0-ls0"; next;)
+])
+AT_CHECK([ovn-sbctl dump-flows lr0 | grep lr_in_admission | \
+    grep -c 'is_chassis_resident("cr-lr0-ls0")'], [0], [2
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# With a localnet port on the peer switch, peer_needs_cr_port_creation() is
+# false and only the DGP's own cr-port is derived.
+check ovn-nbctl ls-add ls1
+check ovn-nbctl --wait=sb lr-add lr1
+check ovn-nbctl lrp-add lr1 lr1-ls1 00:00:00:00:ee:01 192.168.1.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls1 ls1-lr1 lr1-ls1
+check ovn-nbctl --wait=sb lsp-add ls1 ln1 -- lsp-set-type ln1 localnet \
+    -- lsp-set-addresses ln1 unknown -- lsp-set-options ln1 network_name=phys
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr1-ls1 hv1 20
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=logical_port list port_binding | \
+    grep '^cr-' | sort], [0], [dnl
+cr-lr0-ls0
+cr-lr1-ls1
+cr-ls0-lr0
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The same transition driven by ha_chassis_group instead of gateway_chassis.
+check ovn-nbctl ls-add ls2
+check ovn-nbctl --wait=sb lr-add lr2
+check ovn-nbctl lrp-add lr2 lr2-ls2 00:00:00:00:dd:01 192.168.2.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls2 ls2-lr2 lr2-ls2
+check ovn-nbctl ha-chassis-group-add hcg0
+check ovn-nbctl --wait=sb ha-chassis-group-add-chassis hcg0 hv1 10
+hcg=$(ovn-nbctl --bare --columns=_uuid find ha_chassis_group name=hcg0)
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router_Port lr2-ls2 \
+    ha_chassis_group=$hcg
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=name list ha_chassis_group | \
+    sed '/^$/d' | sort], [0], [dnl
+hcg0
+lr0-ls0
+lr1-ls1
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A multi-chassis gateway also gets recorded in the router group, which
+# en_sync_from_sb needs to build the SB HA chassis group's 'ref_chassis'.
+check ovn-sbctl chassis-add hv2 geneve 10.0.0.2
+check ovn-nbctl ls-add ls6
+check ovn-nbctl --wait=sb lr-add lr6
+check ovn-nbctl lrp-add lr6 lr6-ls6 00:00:00:00:bb:01 192.168.6.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls6 ls6-lr6 lr6-ls6
+# Only a recompute builds the router groups.
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr6-ls6 hv1 20 -- \
+    lrp-set-gateway-chassis lr6-ls6 hv2 10
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+hcg=$(ovn-sbctl --bare --columns=ha_chassis find ha_chassis_group name=lr6-ls6)
+AT_CHECK([for h in $hcg; do \
+    ovn-sbctl --bare --columns=priority list ha_chassis $h; done | sort], [0],
+[dnl
+10
+20
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The router's other ports lose their "port unreachable" flows, which only
+# exist while the router has no distributed gateway port.
+check ovn-nbctl ls-add ls7
+check ovn-nbctl --wait=sb lr-add lr7
+check ovn-nbctl lrp-add lr7 lr7-ls7 00:00:00:00:bb:11 192.168.7.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls7 ls7-lr7 lr7-ls7
+check ovn-nbctl --wait=sb lrp-add lr7 lr7-ext 00:00:00:00:bb:12 172.16.7.1/24
+
+AT_CHECK([ovn-sbctl dump-flows lr7 | grep lr_in_ip_input | \
+    grep -c '192.168.7.1 && !ip.later_frag'], [0], [4
+])
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr7-ext hv1 20
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl dump-flows lr7 | grep lr_in_ip_input | \
+    grep -c '192.168.7.1 && !ip.later_frag'], [1], [0
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A second distributed gateway port on the same router is not handled: the
+# DGPs generate flows for each other.
+check ovn-nbctl lrp-add lr0 lr0-ls3 00:00:00:00:ff:03 192.168.3.1/24
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ls3 hv1 20
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Neither is a multi-chassis gateway on a router that has no logical router
+# group yet, since that is where the HA chassis group has to be recorded for
+# en_sync_from_sb to build the group's 'ref_chassis'.  Only a recompute builds
+# router groups, so a router created incrementally has none.
+check ovn-nbctl ls-add ls5
+check ovn-nbctl --wait=sb lr-add lr5
+check ovn-nbctl lrp-add lr5 lr5-ls5 00:00:00:00:dd:01 192.168.5.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls5 ls5-lr5 lr5-ls5
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr5-ls5 hv1 20 -- \
+    lrp-set-gateway-chassis lr5-ls5 hv2 10
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Neither is a router with NAT, whose centralization depends on the DGP.
+check ovn-nbctl ls-add ls4
+check ovn-nbctl --wait=sb lr-add lr4
+check ovn-nbctl lrp-add lr4 lr4-ls4 00:00:00:00:cc:01 192.168.4.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls4 ls4-lr4 lr4-ls4
+check ovn-nbctl --wait=sb lr-nat-add lr4 snat 10.0.0.1 192.168.4.0/24
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr4-ls4 hv1 20
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
 
 OVN_FOR_EACH_NORTHD_NO_HV([
 AT_SETUP([SB Port binding incremental processing])
@@ -12970,12 +13175,11 @@ check ovn-nbctl --wait=sb lsp-add ls0 vif1 \
     -- lsp-set-addresses vif1 "aa:aa:aa:00:00:01 192.168.0.11"
 
 # Turning the LRP into a distributed gateway port makes northd insert an SB
-# HA_Chassis_Group.  That write used to come back as a second recompute; only
-# the one for the NB change is expected now.
+# HA_Chassis_Group.  Neither the NB change nor that write recomputes northd.
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ls0 hv1 20
 check ovn-nbctl --wait=sb sync
-AT_CHECK([test "$(northd_recompute_count)" = 1])
+AT_CHECK([test "$(northd_recompute_count)" = 0])
 wait_row_count ha_chassis_group 1 name=lr0-ls0
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE

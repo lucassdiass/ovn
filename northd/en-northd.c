@@ -353,9 +353,10 @@ routes_northd_change_handler(struct engine_node *node,
         return EN_HANDLED_UNCHANGED;
     }
 
-    /* LRP modifications are not incrementally processed by the northd node
-     * (they force a recompute), so trk_lrps->updated is always empty here. */
-    ovs_assert(hmapx_is_empty(&trk_lrps->updated));
+    /* The only LRP modification the northd node processes incrementally is a
+     * port becoming a distributed gateway port, which leaves its "networks"
+     * -- and therefore its connected routes -- untouched.  So
+     * trk_lrps->updated needs no handling here. */
 
     routes_data->tracked = true;
 
@@ -376,9 +377,15 @@ routes_northd_change_handler(struct engine_node *node,
         }
     }
 
-    /* Created LRPs: add their connected routes. */
+    /* Created LRPs: add their connected routes.  A chassisredirect port is
+     * derived from another port and carries no networks of its own; a full
+     * recompute gives it no connected routes either, as build_parsed_routes()
+     * iterates od->ports, which cr-ports are not part of. */
     HMAPX_FOR_EACH (hmapx_node, &trk_lrps->created) {
         op = hmapx_node->data;
+        if (is_cr_port(op)) {
+            continue;
+        }
         parsed_routes_add_connected(
             op->od, op, &routes_data->parsed_routes,
             &routes_data->trk_data.trk_crupdated_parsed_route);
