@@ -954,6 +954,12 @@ bool northd_handle_lr_changes(struct ovsdb_idl_txn *,
                               struct northd_data *);
 bool northd_handle_pgs_acl_changes(const struct northd_input *ni,
                                    struct northd_data *nd);
+void northd_sync_ha_chassis_groups(
+    struct ovsdb_idl_txn *ovnsb_txn,
+    const struct sbrec_ha_chassis_group_table *,
+    struct ovsdb_idl_index *sbrec_chassis_by_name,
+    struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name,
+    const struct hmap *ls_ports, const struct hmap *lr_ports);
 bool northd_handle_ipam_changes(struct northd_data *nd);
 void destroy_northd_data_tracked_changes(struct northd_data *);
 void northd_destroy(struct northd_data *data);

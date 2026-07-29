@@ -2538,6 +2538,62 @@ ovn_update_ipv6_prefix(struct hmap *lr_ports)
     }
 }
 
+/* Sync the SB HA_Chassis_Group of the chassisredirect port 'op' from the
+ * gateway configuration of its NB logical router port, and record the group
+ * name in 'active_ha_chassis_grps' so that cleanup_sb_ha_chassis_groups()
+ * keeps it. */
+static void
+cr_port_sync_ha_chassis_group(
+    struct ovsdb_idl_txn *ovnsb_txn,
+    struct ovsdb_idl_index *sbrec_chassis_by_name,
+    struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name,
+    const struct ovn_port *op, struct sset *active_ha_chassis_grps)
+{
+    ovs_assert(op->nbrp);
+    ovs_assert(op->sb);
+    ovs_assert(sbrec_ha_chassis_grp_by_name);
+    ovs_assert(active_ha_chassis_grps);
+
+    if (op->nbrp->ha_chassis_group) {
+        if (op->nbrp->n_gateway_chassis) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+            VLOG_WARN_RL(&rl, "Both ha_chassis_group and "
+                         "gateway_chassis configured on port %s; "
+                         "ignoring the latter.", op->nbrp->name);
+        }
+
+        /* HA Chassis group is set. Ignore 'gateway_chassis'. */
+        sync_ha_chassis_group_for_sbpb(ovnsb_txn, sbrec_chassis_by_name,
+                                       sbrec_ha_chassis_grp_by_name,
+                                       op->nbrp->ha_chassis_group, op->sb);
+        sset_add(active_ha_chassis_grps,
+                 op->nbrp->ha_chassis_group->name);
+    } else if (op->nbrp->n_gateway_chassis) {
+        /* Legacy gateway_chassis support.
+         * Create ha_chassis_group for the Northbound gateway_chassis
+         * associated with the lrp. */
+        if (sbpb_gw_chassis_needs_update(op->sb, op->nbrp,
+                                         sbrec_chassis_by_name)) {
+            copy_gw_chassis_from_nbrp_to_sbpb(ovnsb_txn,
+                                              sbrec_chassis_by_name,
+                                              sbrec_ha_chassis_grp_by_name,
+                                              op->nbrp, op->sb);
+        }
+
+        sset_add(active_ha_chassis_grps, op->nbrp->name);
+    } else {
+        /* Nothing is set. Clear ha_chassis_group  from pb. */
+        if (op->sb->ha_chassis_group) {
+            sbrec_port_binding_set_ha_chassis_group(op->sb, NULL);
+        }
+    }
+
+    if (op->sb->n_gateway_chassis) {
+        /* Delete the legacy gateway_chassis from the pb. */
+        sbrec_port_binding_set_gateway_chassis(op->sb, NULL, 0);
+    }
+}
+
 static const struct sbrec_chassis *
 chassis_lookup(struct ovsdb_idl_index *sbrec_chassis_by_name,
                struct ovsdb_idl_index *sbrec_chassis_by_hostname,
@@ -2806,49 +2862,9 @@ ovn_port_update_sbrec(struct ovsdb_idl_txn *ovnsb_txn,
         if (is_cr_port(op)) {
             ovs_assert(sbrec_chassis_by_name);
             ovs_assert(sbrec_chassis_by_hostname);
-            ovs_assert(sbrec_ha_chassis_grp_by_name);
-            ovs_assert(active_ha_chassis_grps);
-
-            if (op->nbrp->ha_chassis_group) {
-                if (op->nbrp->n_gateway_chassis) {
-                    static struct vlog_rate_limit rl
-                        = VLOG_RATE_LIMIT_INIT(1, 1);
-                    VLOG_WARN_RL(&rl, "Both ha_chassis_group and "
-                                 "gateway_chassis configured on port %s; "
-                                 "ignoring the latter.", op->nbrp->name);
-                }
-
-                /* HA Chassis group is set. Ignore 'gateway_chassis'. */
-                sync_ha_chassis_group_for_sbpb(ovnsb_txn,
-                                               sbrec_chassis_by_name,
-                                               sbrec_ha_chassis_grp_by_name,
-                                               op->nbrp->ha_chassis_group,
-                                               op->sb);
-                sset_add(active_ha_chassis_grps,
-                         op->nbrp->ha_chassis_group->name);
-            } else if (op->nbrp->n_gateway_chassis) {
-                /* Legacy gateway_chassis support.
-                 * Create ha_chassis_group for the Northbound gateway_chassis
-                 * associated with the lrp. */
-                if (sbpb_gw_chassis_needs_update(op->sb, op->nbrp,
-                                                 sbrec_chassis_by_name)) {
-                    copy_gw_chassis_from_nbrp_to_sbpb(
-                        ovnsb_txn, sbrec_chassis_by_name,
-                        sbrec_ha_chassis_grp_by_name, op->nbrp, op->sb);
-                }
-
-                sset_add(active_ha_chassis_grps, op->nbrp->name);
-            } else {
-                /* Nothing is set. Clear ha_chassis_group  from pb. */
-                if (op->sb->ha_chassis_group) {
-                    sbrec_port_binding_set_ha_chassis_group(op->sb, NULL);
-                }
-            }
-
-            if (op->sb->n_gateway_chassis) {
-                /* Delete the legacy gateway_chassis from the pb. */
-                sbrec_port_binding_set_gateway_chassis(op->sb, NULL, 0);
-            }
+            cr_port_sync_ha_chassis_group(ovnsb_txn, sbrec_chassis_by_name,
+                                          sbrec_ha_chassis_grp_by_name, op,
+                                          active_ha_chassis_grps);
         }
 
         sbrec_port_binding_set_parent_port(op->sb, NULL);
@@ -3144,6 +3160,74 @@ cleanup_sb_ha_chassis_groups(
             sbrec_ha_chassis_group_delete(b);
         }
     }
+}
+
+/* Re-sync the SB HA_Chassis_Group rows that northd owns.
+ *
+ * northd's own data does not depend on the SB HA_Chassis_Group and SB Chassis
+ * tables: they are only read while syncing the port bindings that reference a
+ * group, i.e. the chassisredirect port of a distributed gateway port and
+ * "external" logical switch ports.  A change to either table -- including the
+ * one northd itself just made when a port started needing a group -- therefore
+ * only requires redoing that sync, not a full recompute. */
+void
+northd_sync_ha_chassis_groups(
+    struct ovsdb_idl_txn *ovnsb_txn,
+    const struct sbrec_ha_chassis_group_table *sbrec_ha_chassis_group_table,
+    struct ovsdb_idl_index *sbrec_chassis_by_name,
+    struct ovsdb_idl_index *sbrec_ha_chassis_grp_by_name,
+    const struct hmap *ls_ports, const struct hmap *lr_ports)
+{
+    struct sset active_ha_chassis_grps =
+        SSET_INITIALIZER(&active_ha_chassis_grps);
+    struct ovn_port *op;
+
+    /* The chassisredirect port of a distributed gateway port owns the
+     * group. */
+    HMAP_FOR_EACH (op, key_node, lr_ports) {
+        if (op->sb && op->nbrp && is_cr_port(op)) {
+            cr_port_sync_ha_chassis_group(ovnsb_txn, sbrec_chassis_by_name,
+                                          sbrec_ha_chassis_grp_by_name, op,
+                                          &active_ha_chassis_grps);
+        }
+    }
+
+    HMAP_FOR_EACH (op, key_node, ls_ports) {
+        if (!op->sb || !op->nbsp) {
+            continue;
+        }
+
+        if (is_cr_port(op)) {
+            /* The chassisredirect port derived from the DGP's peer switch port
+             * owns no group of its own; it mirrors the one of the DGP's
+             * cr-port (see ovn_port_update_sbrec()). */
+            const struct ovn_port *peer = op->primary_port->peer;
+            if (peer && peer->cr_port && peer->cr_port->sb) {
+                sbrec_port_binding_set_ha_chassis_group(
+                    op->sb, peer->cr_port->sb->ha_chassis_group);
+            }
+        } else if (lsp_is_external(op->nbsp)) {
+            /* Mirror ovn_port_update_sbrec() exactly, clearing included: a
+             * port binding left referencing a group that is no longer active
+             * would make the cleanup below hit a referential integrity
+             * violation. */
+            if (op->nbsp->ha_chassis_group) {
+                sync_ha_chassis_group_for_sbpb(ovnsb_txn,
+                                               sbrec_chassis_by_name,
+                                               sbrec_ha_chassis_grp_by_name,
+                                               op->nbsp->ha_chassis_group,
+                                               op->sb);
+                sset_add(&active_ha_chassis_grps,
+                         op->nbsp->ha_chassis_group->name);
+            } else {
+                sbrec_port_binding_set_ha_chassis_group(op->sb, NULL);
+            }
+        }
+    }
+
+    cleanup_sb_ha_chassis_groups(sbrec_ha_chassis_group_table,
+                                 &active_ha_chassis_grps);
+    sset_destroy(&active_ha_chassis_grps);
 }
 
 static void

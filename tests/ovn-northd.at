@@ -12916,18 +12916,18 @@ check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lrp-set-gateway-chassis lrp hv1
 wait_column "hosting-chassis=hv1" nb:Logical_Router_Port status name=lrp
 
-# There will be 2 recomputes of northd engine node
-#   1. missing handler for input NB_logical_router
-#   2. missing handler for input SB_ha_chassis_group
-check_recompute_counter 2 2
+# One recompute of the northd engine node, for the missing handler of input
+# NB_logical_router.  The SB HA_Chassis_Group write that follows no longer
+# triggers a second one.
+check_recompute_counter 1 1
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb clear logical_router_port lrp gateway_chassis
-# There will be 2 recomputes of northd engine node
-#   1. missing handler for input NB_logical_router
-#   2. missing handler for input SB_ha_chassis_group
-check_recompute_counter 2 2
+# One recompute of the northd engine node, for the missing handler of input
+# NB_logical_router.  The SB HA_Chassis_Group write that follows no longer
+# triggers a second one.
+check_recompute_counter 1 1
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
 # Delete some of the ports.
@@ -12949,6 +12949,68 @@ CHECK_NO_CHANGE_AFTER_RECOMPUTE
 # lr0 is not local datapath as lrp got deleted.
 OVN_CLEANUP([hv1
 ignored_dp=lr0])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([SB Chassis and HA_Chassis_Group incremental processing])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+northd_recompute_count() {
+    as northd ovn-appctl -t ovn-northd inc-engine/show-stats northd recompute
+}
+
+check ovn-sbctl chassis-add hv1 geneve 10.0.0.1
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls0 ls0-lr0 lr0-ls0
+check ovn-nbctl --wait=sb lsp-add ls0 vif1 \
+    -- lsp-set-addresses vif1 "aa:aa:aa:00:00:01 192.168.0.11"
+
+# Turning the LRP into a distributed gateway port makes northd insert an SB
+# HA_Chassis_Group.  That write used to come back as a second recompute; only
+# the one for the NB change is expected now.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ls0 hv1 20
+check ovn-nbctl --wait=sb sync
+AT_CHECK([test "$(northd_recompute_count)" = 1])
+wait_row_count ha_chassis_group 1 name=lr0-ls0
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# An ovn-controller refreshing only Chassis.nb_cfg cannot change anything
+# northd wrote.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-sbctl set chassis hv1 nb_cfg=5
+check ovn-nbctl --wait=sb sync
+AT_CHECK([test "$(northd_recompute_count)" = 0])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Clearing the members of the SB HA_Chassis_Group behind northd's back is
+# repaired by the change handler, without a recompute.
+grp=$(ovn-sbctl --bare --columns=_uuid find ha_chassis_group name=lr0-ls0)
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-sbctl clear ha_chassis_group $grp ha_chassis
+check ovn-nbctl --wait=sb sync
+AT_CHECK([test "$(northd_recompute_count)" = 0])
+AT_CHECK([test -n "$(ovn-sbctl --bare --columns=ha_chassis find \
+    ha_chassis_group name=lr0-ls0)"])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A created chassis can change any port binding naming it, which this handler
+# does not track: it still falls back to a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-sbctl chassis-add hv2 geneve 10.0.0.2
+check ovn-nbctl --wait=sb sync
+AT_CHECK([test "$(northd_recompute_count)" -ge 1])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 

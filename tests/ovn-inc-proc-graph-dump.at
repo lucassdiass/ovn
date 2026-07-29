@@ -19,12 +19,10 @@ digraph "Incremental-Processing-Engine" {
 	NB_network_function [[style=filled, shape=box, fillcolor=white, label="NB_network_function"]];
 	NB_network_function_group [[style=filled, shape=box, fillcolor=white, label="NB_network_function_group"]];
 	NB_logical_switch_port_health_check [[style=filled, shape=box, fillcolor=white, label="NB_logical_switch_port_health_check"]];
-	SB_chassis [[style=filled, shape=box, fillcolor=white, label="SB_chassis"]];
 	SB_encap [[style=filled, shape=box, fillcolor=white, label="SB_encap"]];
 	SB_mirror [[style=filled, shape=box, fillcolor=white, label="SB_mirror"]];
 	SB_meter [[style=filled, shape=box, fillcolor=white, label="SB_meter"]];
 	SB_dns [[style=filled, shape=box, fillcolor=white, label="SB_dns"]];
-	SB_ha_chassis_group [[style=filled, shape=box, fillcolor=white, label="SB_ha_chassis_group"]];
 	SB_service_monitor [[style=filled, shape=box, fillcolor=white, label="SB_service_monitor"]];
 	SB_static_mac_binding [[style=filled, shape=box, fillcolor=white, label="SB_static_mac_binding"]];
 	SB_chassis_template_var [[style=filled, shape=box, fillcolor=white, label="SB_chassis_template_var"]];
@@ -34,6 +32,7 @@ digraph "Incremental-Processing-Engine" {
 	NB_nb_global [[style=filled, shape=box, fillcolor=white, label="NB_nb_global"]];
 	NB_logical_switch [[style=filled, shape=box, fillcolor=white, label="NB_logical_switch"]];
 	SB_sb_global [[style=filled, shape=box, fillcolor=white, label="SB_sb_global"]];
+	SB_chassis [[style=filled, shape=box, fillcolor=white, label="SB_chassis"]];
 	NB_sampling_app [[style=filled, shape=box, fillcolor=white, label="NB_sampling_app"]];
 	sampling_app [[style=filled, shape=box, fillcolor=white, label="sampling_app"]];
 	NB_sampling_app -> sampling_app [[label=""]];
@@ -45,6 +44,7 @@ digraph "Incremental-Processing-Engine" {
 	sampling_app -> global_config [[label=""]];
 	SB_mac_binding [[style=filled, shape=box, fillcolor=white, label="SB_mac_binding"]];
 	SB_port_binding [[style=filled, shape=box, fillcolor=white, label="SB_port_binding"]];
+	SB_ha_chassis_group [[style=filled, shape=box, fillcolor=white, label="SB_ha_chassis_group"]];
 	SB_datapath_binding [[style=filled, shape=box, fillcolor=white, label="SB_datapath_binding"]];
 	datapath_logical_switch [[style=filled, shape=box, fillcolor=white, label="datapath_logical_switch"]];
 	NB_logical_switch -> datapath_logical_switch [[label="datapath_logical_switch_handler"]];
@@ -78,12 +78,10 @@ digraph "Incremental-Processing-Engine" {
 	NB_network_function -> northd [[label=""]];
 	NB_network_function_group -> northd [[label=""]];
 	NB_logical_switch_port_health_check -> northd [[label=""]];
-	SB_chassis -> northd [[label=""]];
 	SB_encap -> northd [[label="engine_noop_handler"]];
 	SB_mirror -> northd [[label=""]];
 	SB_meter -> northd [[label=""]];
 	SB_dns -> northd [[label=""]];
-	SB_ha_chassis_group -> northd [[label=""]];
 	SB_service_monitor -> northd [[label=""]];
 	SB_static_mac_binding -> northd [[label=""]];
 	SB_chassis_template_var -> northd [[label=""]];
@@ -92,6 +90,8 @@ digraph "Incremental-Processing-Engine" {
 	global_config -> northd [[label="northd_global_config_handler"]];
 	SB_mac_binding -> northd [[label="engine_noop_handler"]];
 	SB_port_binding -> northd [[label="northd_sb_port_binding_handler"]];
+	SB_chassis -> northd [[label="northd_sb_chassis_handler"]];
+	SB_ha_chassis_group -> northd [[label="northd_sb_ha_chassis_group_handler"]];
 	datapath_synced_logical_switch -> northd [[label="northd_nb_logical_switch_handler"]];
 	datapath_synced_logical_router -> northd [[label="northd_nb_logical_router_handler"]];
 	lb_data -> northd [[label="northd_lb_data_handler"]];

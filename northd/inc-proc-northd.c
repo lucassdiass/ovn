@@ -260,7 +260,6 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_northd, &en_nb_logical_switch_port_health_check,
                      NULL);
 
-    engine_add_input(&en_northd, &en_sb_chassis, NULL);
     /* northd uses SB Encap mainly to get the index for requested-encap-ip
      * lookups. Chassis owns Encap membership, so encap create/delete are
      * covered by the SB chassis input. Hence a noop handler is sufficient
@@ -269,7 +268,6 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_northd, &en_sb_mirror, NULL);
     engine_add_input(&en_northd, &en_sb_meter, NULL);
     engine_add_input(&en_northd, &en_sb_dns, NULL);
-    engine_add_input(&en_northd, &en_sb_ha_chassis_group, NULL);
     engine_add_input(&en_northd, &en_sb_service_monitor, NULL);
     engine_add_input(&en_northd, &en_sb_static_mac_binding, NULL);
     engine_add_input(&en_northd, &en_sb_chassis_template_var, NULL);
@@ -291,6 +289,14 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
 
     engine_add_input(&en_northd, &en_sb_port_binding,
                      northd_sb_port_binding_handler);
+    /* Both handlers below write through the cached 'op->sb' port-binding
+     * pointers, which northd_sb_port_binding_handler() re-points after northd
+     * inserted a row in the previous iteration.  They must therefore be
+     * registered after the SB port binding input: engine_compute() runs the
+     * input handlers in registration order. */
+    engine_add_input(&en_northd, &en_sb_chassis, northd_sb_chassis_handler);
+    engine_add_input(&en_northd, &en_sb_ha_chassis_group,
+                     northd_sb_ha_chassis_group_handler);
     engine_add_input(&en_northd, &en_datapath_synced_logical_switch,
                      northd_nb_logical_switch_handler);
     engine_add_input(&en_northd, &en_datapath_synced_logical_router,

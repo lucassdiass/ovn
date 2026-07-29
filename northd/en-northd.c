@@ -762,6 +762,65 @@ northd_sb_fdb_change_handler(struct engine_node *node, void *data)
     return EN_HANDLED_UNCHANGED;
 }
 
+enum engine_input_handler_result
+northd_sb_chassis_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct sbrec_chassis_table *sbrec_chassis_table =
+        EN_OVSDB_GET(engine_get_input("SB_chassis", node));
+
+    /* Only a few columns of a Chassis row feed northd's output: 'name' and
+     * 'hostname' resolve options:requested-chassis and the members of an HA
+     * chassis group, 'other_config' carries "is-remote" and 'encaps' backs the
+     * requested-encap-ip lookups (SB Encap has a noop handler for that very
+     * reason).  A row that changed none of them -- an ovn-controller updating
+     * 'nb_cfg' being the common case -- cannot change anything northd wrote.
+     *
+     * A created or deleted chassis, or a change to one of those columns, can
+     * change any port binding that names it, which this handler does not
+     * track; fall back to a full recompute for those. */
+    const struct sbrec_chassis *chassis;
+    SBREC_CHASSIS_TABLE_FOR_EACH_TRACKED (chassis, sbrec_chassis_table) {
+        if (sbrec_chassis_is_new(chassis) ||
+            sbrec_chassis_is_deleted(chassis) ||
+            sbrec_chassis_is_updated(chassis, SBREC_CHASSIS_COL_NAME) ||
+            sbrec_chassis_is_updated(chassis, SBREC_CHASSIS_COL_HOSTNAME) ||
+            sbrec_chassis_is_updated(chassis,
+                                     SBREC_CHASSIS_COL_OTHER_CONFIG) ||
+            sbrec_chassis_is_updated(chassis, SBREC_CHASSIS_COL_ENCAPS)) {
+            return EN_UNHANDLED;
+        }
+    }
+
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* The SB HA_Chassis_Group table is only read while syncing the port bindings
+ * that reference a group, so a change to it -- including the one northd itself
+ * just made when a port started needing a group -- is handled by redoing that
+ * sync instead of recomputing northd. */
+enum engine_input_handler_result
+northd_sb_ha_chassis_group_handler(struct engine_node *node, void *data)
+{
+    const struct engine_context *eng_ctx = engine_get_context();
+    if (!eng_ctx->ovnsb_idl_txn) {
+        return EN_UNHANDLED;
+    }
+
+    struct northd_data *nd = data;
+
+    northd_sync_ha_chassis_groups(
+        eng_ctx->ovnsb_idl_txn,
+        EN_OVSDB_GET(engine_get_input("SB_ha_chassis_group", node)),
+        engine_ovsdb_node_get_index(engine_get_input("SB_chassis", node),
+                                    "sbrec_chassis_by_name"),
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_ha_chassis_group", node),
+            "sbrec_ha_chassis_grp_by_name"),
+        &nd->ls_ports, &nd->lr_ports);
+
+    return EN_HANDLED_UNCHANGED;
+}
+
 void
 en_route_policies_cleanup(void *data)
 {
