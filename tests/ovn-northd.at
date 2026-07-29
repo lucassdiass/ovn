@@ -40,6 +40,25 @@ m4_define([CHECK_NO_CHANGE_AFTER_RECOMPUTE], [
 ])
 ])
 
+# CHECK_HA_CHASSIS_GROUP([name], [priorities], [ref chassis])
+# Checks the SB HA_Chassis_Group 'name': the priorities of its HA_Chassis rows,
+# one per line and sorted, and the names of the chassis in its 'ref_chassis',
+# space separated and sorted.  'ref_chassis' is derived from the port bindings
+# by en_sync_from_sb, one engine iteration after the group itself, hence the
+# wait.
+m4_define([CHECK_HA_CHASSIS_GROUP], [
+    AT_CHECK([for h in $(ovn-sbctl --bare --columns=ha_chassis find \
+        ha_chassis_group name=$1 | sed '/^$/d'); do \
+            ovn-sbctl --bare --columns=priority list ha_chassis $h; \
+        done | sort -n], [0], [$2
+])
+    OVS_WAIT_UNTIL([test "$(for c in $(ovn-sbctl --bare \
+        --columns=ref_chassis find ha_chassis_group name=$1 | \
+        sed '/^$/d'); do \
+            ovn-sbctl --bare --columns=name list chassis $c; \
+        done | sort | xargs)" = "$3"])
+])
+
 m4_divert_push([PREPARE_TESTS])
 # Checks if the provided engine node recomputed or not
 # and if it computed or not.
@@ -12951,6 +12970,9 @@ check ovn-nbctl ls-add ls6
 check ovn-nbctl --wait=sb lr-add lr6
 check ovn-nbctl lrp-add lr6 lr6-ls6 00:00:00:00:bb:01 192.168.6.1/24
 check ovn-nbctl --wait=sb lsp-add-router-port ls6 ls6-lr6 lr6-ls6
+check ovn-nbctl --wait=sb lsp-add ls6 vif6 \
+    -- lsp-set-addresses vif6 "aa:aa:aa:00:00:06 192.168.6.11"
+check ovn-sbctl lsp-bind vif6 hv1
 # Only a recompute builds the router groups.
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
@@ -12960,13 +12982,30 @@ check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr6-ls6 hv1 20 -- \
 check_engine_compute northd incremental
 check_engine_compute lflow incremental
 
-hcg=$(ovn-sbctl --bare --columns=ha_chassis find ha_chassis_group name=lr6-ls6)
-AT_CHECK([for h in $hcg; do \
-    ovn-sbctl --bare --columns=priority list ha_chassis $h; done | sort], [0],
-[dnl
-10
-20
-])
+CHECK_HA_CHASSIS_GROUP([lr6-ls6], [10
+20], [hv1])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The same on a router created incrementally, which has no router group yet:
+# lr_port_make_dgp() builds one, so the 'ref_chassis' still comes out right.
+check ovn-nbctl ls-add ls5
+check ovn-nbctl --wait=sb lr-add lr5
+check ovn-nbctl lrp-add lr5 lr5-ls5 00:00:00:00:dd:01 192.168.5.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls5 ls5-lr5 lr5-ls5
+check ovn-nbctl --wait=sb lsp-add ls5 vif5 \
+    -- lsp-set-addresses vif5 "aa:aa:aa:00:00:05 192.168.5.11"
+check ovn-sbctl lsp-bind vif5 hv2
+check ovn-nbctl --wait=sb sync
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr5-ls5 hv1 20 -- \
+    lrp-set-gateway-chassis lr5-ls5 hv2 10
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+CHECK_HA_CHASSIS_GROUP([lr5-ls5], [10
+20], [hv2])
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
@@ -12997,22 +13036,6 @@ CHECK_NO_CHANGE_AFTER_RECOMPUTE
 check ovn-nbctl lrp-add lr0 lr0-ls3 00:00:00:00:ff:03 192.168.3.1/24
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ls3 hv1 20
-check_engine_compute northd recompute
-
-CHECK_NO_CHANGE_AFTER_RECOMPUTE
-
-# Neither is a multi-chassis gateway on a router that has no logical router
-# group yet, since that is where the HA chassis group has to be recorded for
-# en_sync_from_sb to build the group's 'ref_chassis'.  Only a recompute builds
-# router groups, so a router created incrementally has none.
-check ovn-nbctl ls-add ls5
-check ovn-nbctl --wait=sb lr-add lr5
-check ovn-nbctl lrp-add lr5 lr5-ls5 00:00:00:00:dd:01 192.168.5.1/24
-check ovn-nbctl --wait=sb lsp-add-router-port ls5 ls5-lr5 lr5-ls5
-
-check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
-check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr5-ls5 hv1 20 -- \
-    lrp-set-gateway-chassis lr5-ls5 hv2 10
 check_engine_compute northd recompute
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE

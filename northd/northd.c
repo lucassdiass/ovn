@@ -596,6 +596,8 @@ struct lrouter_group {
 };
 
 static void init_mcast_info_for_datapath(struct ovn_datapath *od);
+static void build_lrouter_groups__(struct hmap *lr_ports,
+                                  struct ovn_datapath *od);
 
 static struct ovn_datapath *
 ovn_datapath_create(struct hmap *datapaths, const struct uuid *key,
@@ -6501,6 +6503,58 @@ check_lrp_changes_other_than_gateway(
     return false;
 }
 
+/* Put 'od' in a logical router group, exactly as build_lrouter_groups() does
+ * during a full recompute -- which is the only thing that builds them, so a
+ * router created incrementally has none until it needs one.  'n_router_dps' is
+ * the total number of logical router datapaths, the most one group can
+ * hold. */
+static void
+lr_group_create(struct hmap *lr_ports, struct ovn_datapath *od,
+                size_t n_router_dps)
+{
+    ovs_assert(od->nbr && !od->lr_group);
+
+    od->lr_group = xzalloc(sizeof *od->lr_group);
+    od->lr_group->router_dps = xcalloc(n_router_dps,
+                                       sizeof *od->lr_group->router_dps);
+    od->lr_group->router_dps[0] = od;
+    od->lr_group->n_router_dps = 1;
+    sset_init(&od->lr_group->ha_chassis_groups);
+    hmapx_init(&od->lr_group->tmp_ha_ref_chassis);
+
+    /* Pulls in the routers connected to 'od', directly or through a logical
+     * switch.  Note that connecting two routers is not processed
+     * incrementally, so any router already in a group keeps it. */
+    build_lrouter_groups__(lr_ports, od);
+}
+
+/* Rebuild the set of SB HA chassis groups of a logical router group, the way
+ * build_lrouter_groups__() derives it from the chassisredirect ports of the
+ * distributed gateway ports during a full recompute.  en_sync_from_sb reads
+ * this set to build each group's 'ref_chassis', so it has to be refreshed
+ * whenever a distributed gateway port's group changes -- and only after the
+ * port bindings have been synced, since that is where it is read from. */
+static void
+lr_group_update_ha_chassis_groups(struct lrouter_group *lr_group)
+{
+    sset_clear(&lr_group->ha_chassis_groups);
+
+    for (int i = 0; i < lr_group->n_router_dps; i++) {
+        const struct ovn_datapath *od = lr_group->router_dps[i];
+        const struct ovn_port *dgp;
+
+        VECTOR_FOR_EACH (&od->l3dgw_ports, dgp) {
+            const struct ovn_port *crp = dgp->cr_port;
+
+            if (crp && crp->sb && crp->sb->ha_chassis_group &&
+                crp->sb->ha_chassis_group->n_ha_chassis > 1) {
+                sset_add(&lr_group->ha_chassis_groups,
+                         crp->sb->ha_chassis_group->name);
+            }
+        }
+    }
+}
+
 /* A logical router port that gains "gateway_chassis" or "ha_chassis_group"
  * becomes a distributed gateway port (DGP), which a full recompute turns into
  * a chassisredirect port plus an entry in od->l3dgw_ports.  Return true when
@@ -6554,16 +6608,6 @@ lrp_becomes_dgp_needs_recompute(
         od->dynamic_routing ||
         od->dynamic_routing_redistribute != DRRM_NONE ||
         od->mcast_info.rtr.relay) {
-        return true;
-    }
-
-    /* lr_port_make_dgp() has to record a multi-chassis HA chassis group in the
-     * router group's 'ha_chassis_groups', which en_sync_from_sb needs to build
-     * the group's 'ref_chassis'.  Only a recompute builds router groups, so a
-     * router created incrementally has nowhere to record it. */
-    if (!od->lr_group &&
-        (nbrp->ha_chassis_group ? nbrp->ha_chassis_group->n_ha_chassis
-                                : nbrp->n_gateway_chassis) > 1) {
         return true;
     }
 
@@ -6650,6 +6694,11 @@ lr_port_make_dgp(struct ovsdb_idl_txn *ovnsb_idl_txn,
         SSET_INITIALIZER(&active_ha_chassis_grps);
     bool ok = false;
 
+    if (!od->lr_group) {
+        lr_group_create(&nd->lr_ports, od,
+                        hmap_count(&nd->lr_datapaths.datapaths));
+    }
+
     struct ovn_port *crp = cr_port_create(ovnsb_idl_txn, &nd->lr_ports, op);
     if (!crp) {
         goto out;
@@ -6674,18 +6723,7 @@ lr_port_make_dgp(struct ovsdb_idl_txn *ovnsb_idl_txn,
                           ni->sbrec_mirror_table, ni->sbrec_encap_by_ip,
                           crp, NULL, &active_ha_chassis_grps);
     add_op_to_northd_tracked_ports(&trk_lrps->created, crp);
-
-    /* What build_lrouter_groups__() derives from the cr-port's port binding
-     * during a recompute.  en_sync_from_sb reads this set to build the HA
-     * chassis group's 'ref_chassis'; without it the group would keep an empty
-     * 'ref_chassis' until something else forces a recompute. */
-    if (crp->sb->ha_chassis_group &&
-        crp->sb->ha_chassis_group->n_ha_chassis > 1) {
-        /* Guaranteed by lrp_becomes_dgp_needs_recompute(). */
-        ovs_assert(od->lr_group);
-        sset_add(&od->lr_group->ha_chassis_groups,
-                 crp->sb->ha_chassis_group->name);
-    }
+    lr_group_update_ha_chassis_groups(od->lr_group);
 
     if (peer_needs_cr_port_creation(op)) {
         struct ovn_port *peer_crp = cr_port_create(ovnsb_idl_txn,
@@ -7016,6 +7054,8 @@ northd_handle_lr_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
          * recalculated nothing will create the lr_group. */
         if (od->lr_group) {
             free(od->lr_group->router_dps);
+            sset_destroy(&od->lr_group->ha_chassis_groups);
+            hmapx_destroy(&od->lr_group->tmp_ha_ref_chassis);
             free(od->lr_group);
         }
 
