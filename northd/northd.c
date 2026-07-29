@@ -6503,6 +6503,54 @@ check_lrp_changes_other_than_gateway(
     return false;
 }
 
+/* Return true if the change to 'nbrp' is confined to its gateway
+ * configuration: the "gateway_chassis" or "ha_chassis_group" column, or one of
+ * the rows they reference.
+ *
+ * A row is also reported as modified when a row it references changed, so a
+ * modification with none of its own columns updated can still be about
+ * something else entirely -- a DHCP_Relay, say.
+   XXX: Need a better OVSDB IDL interface for this check. */
+static bool
+lrp_gateway_change_only(const struct nbrec_logical_router_port *nbrp)
+{
+    if (check_lrp_changes_other_than_gateway(nbrp)) {
+        return false;
+    }
+
+    if (nbrec_logical_router_port_is_updated(
+            nbrp, NBREC_LOGICAL_ROUTER_PORT_COL_GATEWAY_CHASSIS) ||
+        nbrec_logical_router_port_is_updated(
+            nbrp, NBREC_LOGICAL_ROUTER_PORT_COL_HA_CHASSIS_GROUP)) {
+        return true;
+    }
+
+    for (size_t i = 0; i < nbrp->n_gateway_chassis; i++) {
+        if (nbrec_gateway_chassis_row_get_seqno(
+                nbrp->gateway_chassis[i], OVSDB_IDL_CHANGE_MODIFY) > 0) {
+            return true;
+        }
+    }
+
+    const struct nbrec_ha_chassis_group *grp = nbrp->ha_chassis_group;
+    if (grp) {
+        /* Adding or removing a member modifies the group's "ha_chassis"
+         * column; changing a member's priority modifies the member row. */
+        if (nbrec_ha_chassis_group_row_get_seqno(
+                grp, OVSDB_IDL_CHANGE_MODIFY) > 0) {
+            return true;
+        }
+        for (size_t i = 0; i < grp->n_ha_chassis; i++) {
+            if (nbrec_ha_chassis_row_get_seqno(
+                    grp->ha_chassis[i], OVSDB_IDL_CHANGE_MODIFY) > 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 /* Put 'od' in a logical router group, exactly as build_lrouter_groups() does
  * during a full recompute -- which is the only thing that builds them, so a
  * router created incrementally has none until it needs one.  'n_router_dps' is
@@ -6775,6 +6823,32 @@ out:
     return ok;
 }
 
+/* The gateway configuration of the distributed gateway port 'op' changed: one
+ * of its gateway columns, or a Gateway_Chassis / HA_Chassis_Group row it
+ * references.  Nothing about the port itself changes -- the chassisredirect
+ * port and od->l3dgw_ports stay as they are, and no logical flow depends on
+ * which chassis are in the group -- so only the SB HA chassis group derived
+ * from it has to be redone. */
+static void
+lr_port_resync_dgp(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                   const struct northd_input *ni, struct northd_data *nd,
+                   struct ovn_datapath *od)
+{
+    /* This also collects a group that stopped being referenced, e.g. when the
+     * port switched from one HA chassis group to another. */
+    northd_sync_ha_chassis_groups(ovnsb_idl_txn,
+                                  ni->sbrec_ha_chassis_group_table,
+                                  ni->sbrec_chassis_by_name,
+                                  ni->sbrec_ha_chassis_grp_by_name,
+                                  &nd->ls_ports, &nd->lr_ports);
+
+    /* A router with a distributed gateway port always has a router group: a
+     * recompute gives one to every router, and lr_port_make_dgp() gives one to
+     * a router created incrementally. */
+    ovs_assert(od->lr_group);
+    lr_group_update_ha_chassis_groups(od->lr_group);
+}
+
 /* Handles logical router port changes of a changed (created, updated or
  * deleted) logical router 'changed_lr' with datapath 'od'.  Regular
  * (non-gateway) LRPs are created and deleted incrementally, and an existing
@@ -6854,21 +6928,25 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 hmapx_add(&nd->trk_data.trk_routers.crupdated, od);
             } else if (nbrec_logical_router_port_row_get_seqno(
                            new_nbrp, OVSDB_IDL_CHANGE_MODIFY) > 0) {
-                /* The only modification handled in place is the port becoming
-                 * a distributed gateway port.  Re-initializing an LRP
-                 * (re-wiring its peer, networks, ...) is not supported. */
-                if (check_lrp_changes_other_than_gateway(new_nbrp) ||
+                /* The only modifications handled in place concern the gateway
+                 * configuration: a regular port becoming a distributed gateway
+                 * port, and a change to the gateway of one that already is.
+                 * Re-initializing an LRP (re-wiring its peer, networks, ...)
+                 * is not supported, and neither is a distributed gateway port
+                 * going back to being a regular one. */
+                if (!lrp_gateway_change_only(new_nbrp) ||
                     !(new_nbrp->n_gateway_chassis ||
                       new_nbrp->ha_chassis_group)) {
                     goto fail;
                 }
-                if (lrp_becomes_dgp_needs_recompute(
-                        od, op, new_nbrp, nd,
-                        ni->nbrec_static_mac_binding_table)) {
+                if (op->cr_port) {
+                    lr_port_resync_dgp(ovnsb_idl_txn, ni, nd, od);
+                } else if (lrp_becomes_dgp_needs_recompute(
+                               od, op, new_nbrp, nd,
+                               ni->nbrec_static_mac_binding_table)) {
                     goto fail;
-                }
-                if (!lr_port_make_dgp(ovnsb_idl_txn, ni, nd, od, op,
-                                      trk_lrps)) {
+                } else if (!lr_port_make_dgp(ovnsb_idl_txn, ni, nd, od, op,
+                                             trk_lrps)) {
                     goto fail;
                 }
             }
