@@ -5586,6 +5586,89 @@ ls_update_has_unknown(struct ovn_datapath *od)
     return true;
 }
 
+/* A logical switch port whose NB "type" changed from "" (a plain VIF) to
+ * "router" is reprocessed as a deletion followed by a creation.  Return true
+ * when either half of that can't be handled incrementally, so the caller falls
+ * back to a full recompute. */
+static bool
+vif_to_router_lsp_needs_recompute(
+    struct ovn_datapath *od, struct ovn_port *op,
+    const struct nbrec_logical_switch_port *new_nbsp,
+    const struct northd_input *ni, struct northd_data *nd)
+{
+    /* Deletion half: the same constraints as the regular LSP delete path.
+     * 'op->lsp_can_be_inc_processed' was derived from the port as it was
+     * before this change, i.e. from its VIF configuration. */
+    if (!op->lsp_can_be_inc_processed ||
+        sset_contains(&nd->svc_monitor_lsps, op->key) ||
+        op->has_attached_lport_mirror ||
+        is_lsp_mirror_target_port(ni->nbrec_mirror_by_type_and_sink, op)) {
+        return true;
+    }
+
+    /* Some port in this datapath had a requested-tnl-key that couldn't be
+     * satisfied due to a conflict.  Now that a port is being replaced the
+     * conflict may be resolved; let recompute deal with it. */
+    if (od->port_key_conflict &&
+        smap_get_int(&new_nbsp->options, "requested-tnl-key", 0)) {
+        return true;
+    }
+
+    /* Creation half: the same constraints as the regular LSP create path. */
+    if (!lsp_can_be_inc_processed(new_nbsp) ||
+        router_lsp_needs_recompute(od, new_nbsp, &nd->lr_ports, false)) {
+        return true;
+    }
+
+    return false;
+}
+
+/* Reprocess a logical switch port whose NB "type" changed from "" (a plain
+ * VIF) to "router" as a deletion followed by a creation, mirroring
+ * join_logical_ports_lsp(), which also destroys and re-creates the ovn_port
+ * (and its SB port binding) on a type change.  Reinitializing in place is not
+ * an option: a router port must have its peer wired before its SB row is
+ * synced, and ls_port_reinit() does not wire peers.
+ *
+ * 'op' is removed from the port maps and handed over to
+ * 'trk_lsps->deleted'; it stays alive until the end of the engine run so the
+ * lflow and SB port-binding sync nodes can tear its flows down.  Returns the
+ * newly created router port, or NULL on failure. */
+static struct ovn_port *
+ls_replace_vif_with_router_port(
+    struct ovsdb_idl_txn *ovnsb_idl_txn, const struct northd_input *ni,
+    struct northd_data *nd, struct ovn_datapath *od, struct ovn_port *op,
+    const struct nbrec_logical_switch_port *new_nbsp,
+    struct tracked_ovn_ports *trk_lsps)
+{
+    add_op_to_northd_tracked_ports(&trk_lsps->deleted, op);
+    hmap_remove(&nd->ls_ports, &op->key_node);
+    hmap_remove(&od->ports, &op->dp_node);
+    sbrec_port_binding_delete(op->sb);
+    delete_fdb_entries(ni->sbrec_fdb_by_dp_and_port, od->tunnel_key,
+                       op->tunnel_key);
+
+    /* Release the VIF's tunnel key before the router port is created, so that
+     * the latter can claim it again -- required when options:requested-tnl-key
+     * is set.  Clearing it also keeps ovn_port_cleanup() from freeing it a
+     * second time when the tracked deleted port is destroyed. */
+    if (op->tunnel_key) {
+        ovn_free_tnlid(&od->port_tnlids, op->tunnel_key);
+        op->tunnel_key = 0;
+    }
+
+    struct ovn_port *new_op = ls_port_create(
+        ovnsb_idl_txn, &nd->ls_ports, new_nbsp->name, new_nbsp, od,
+        &nd->lr_ports, ni->sbrec_mirror_table, ni->sbrec_chassis_by_name,
+        ni->sbrec_chassis_by_hostname, ni->sbrec_encap_by_ip);
+    if (!new_op) {
+        return NULL;
+    }
+
+    add_op_to_northd_tracked_ports(&trk_lsps->created, new_op);
+    return new_op;
+}
+
 /* Handles logical switch port changes of a changed logical switch.
  * Returns false, if any logical port can't be incrementally handled.
  */
@@ -5675,6 +5758,33 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 /* Existing port updated */
                 bool temp = false;
                 if (lsp_is_router(new_nbsp)) {
+                    if (!op->sb) {
+                        /* Without the SB row the previous type is unknown. */
+                        goto fail;
+                    }
+                    if (!op->sb->type[0]) {
+                        /* The SB port binding type is empty only for a plain
+                         * VIF, so the NB "type" just changed from "" to
+                         * "router".  Reprocess the port as a deletion followed
+                         * by a creation. */
+                        if (vif_to_router_lsp_needs_recompute(od, op, new_nbsp,
+                                                              ni, nd)) {
+                            goto fail;
+                        }
+                        op = ls_replace_vif_with_router_port(
+                            ovnsb_idl_txn, ni, nd, od, op, new_nbsp, trk_lsps);
+                        if (!op) {
+                            goto fail;
+                        }
+                        if (op->peer) {
+                            /* A router port was added to od->router_ports;
+                             * sibling ports' ARP-resolve flows must be
+                             * regenerated. */
+                            router_ports_changed = true;
+                        }
+                        op->visited = true;
+                        continue;
+                    }
                     /* The SB port binding type of a router port ("patch",
                      * "l3gateway", ...) never matches its NB type ("router"),
                      * so lsp_is_type_changed() can't be used here.  Re-wiring
