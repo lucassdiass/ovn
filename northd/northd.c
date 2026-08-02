@@ -1097,6 +1097,51 @@ get_op_routable_addresses(struct ovn_port *op,
 }
 
 
+/* Returns true if the NB "options" key 'key' has no effect whatsoever on a
+ * logical switch port of type "router".
+ *
+ * "requested-chassis" is only consulted for a VIF, by
+ * ovn_port_update_sbrec_chassis(); a router port takes its SB type and chassis
+ * from its peer LRP instead.  Neutron writes the key on every port it creates,
+ * the switch side of a router gateway port included, so a router port commonly
+ * sees it change without anything northd generates changing with it. */
+static bool
+lsp_router_option_is_irrelevant(const char *key)
+{
+    static const char *const irrelevant_options[] = {
+        "requested-chassis",
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(irrelevant_options); i++) {
+        if (!strcmp(key, irrelevant_options[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Refreshes 'op->router_lsp_options' from the NB options of 'nbsp'.  Only a
+ * port of type "router" keeps a copy; for any other port the cache is left
+ * empty. */
+static void
+ovn_port_set_router_lsp_options(struct ovn_port *op,
+                                const struct nbrec_logical_switch_port *nbsp)
+{
+    smap_destroy(&op->router_lsp_options);
+    smap_init(&op->router_lsp_options);
+
+    if (!nbsp || !lsp_is_router(nbsp)) {
+        return;
+    }
+
+    const struct smap_node *node;
+    SMAP_FOR_EACH (node, &nbsp->options) {
+        if (!lsp_router_option_is_irrelevant(node->key)) {
+            smap_add(&op->router_lsp_options, node->key, node->value);
+        }
+    }
+}
+
 static void
 ovn_port_set_nb(struct ovn_port *op,
                 const struct nbrec_logical_switch_port *nbsp,
@@ -1107,6 +1152,7 @@ ovn_port_set_nb(struct ovn_port *op,
         op->lsp_can_be_inc_processed = lsp_can_be_inc_processed(nbsp);
     }
     op->nbrp = nbrp;
+    ovn_port_set_router_lsp_options(op, nbsp);
     init_mcast_port_info(&op->mcast_info, op->nbsp, op->nbrp);
 }
 
@@ -1124,6 +1170,7 @@ ovn_port_create(struct hmap *ports, const char *key,
 
     op->key = xstrdup(key);
     op->sb = sb;
+    smap_init(&op->router_lsp_options);
     ovn_port_set_nb(op, nbsp, nbrp);
     op->primary_port = op->cr_port = NULL;
     hmap_insert(ports, &op->key_node, hash_string(op->key, 0));
@@ -1163,6 +1210,7 @@ static void
 ovn_port_destroy_orphan(struct ovn_port *port)
 {
     ovn_port_cleanup(port);
+    smap_destroy(&port->router_lsp_options);
     free(port->json_key);
     free(port->key);
     lflow_ref_destroy(port->lflow_ref);
@@ -5522,9 +5570,19 @@ ls_changes_can_be_handled(
     return true;
 }
 
+/* Columns of a logical switch port that a caller of
+ * check_lsp_changes_other_than_up__() can declare it takes care of itself.
+ * The "up" column is always ignored. */
+enum lsp_ignored_columns {
+    LSP_IGNORE_NONE         = 0,
+    LSP_IGNORE_ADDRESSES    = 1 << 0,
+    LSP_IGNORE_OPTIONS      = 1 << 1,
+    LSP_IGNORE_EXTERNAL_IDS = 1 << 2,
+};
+
 static bool
 check_lsp_changes_other_than_up__(
-    const struct nbrec_logical_switch_port *nbsp, bool ignore_addresses)
+    const struct nbrec_logical_switch_port *nbsp, uint32_t ignored_columns)
 {
     /* Check if the columns are changed in this row. */
     enum nbrec_logical_switch_port_column_id col;
@@ -5535,8 +5593,16 @@ check_lsp_changes_other_than_up__(
         if (col == NBREC_LOGICAL_SWITCH_PORT_COL_UP) {
             continue;
         }
-        if (ignore_addresses &&
+        if ((ignored_columns & LSP_IGNORE_ADDRESSES) &&
             col == NBREC_LOGICAL_SWITCH_PORT_COL_ADDRESSES) {
+            continue;
+        }
+        if ((ignored_columns & LSP_IGNORE_OPTIONS) &&
+            col == NBREC_LOGICAL_SWITCH_PORT_COL_OPTIONS) {
+            continue;
+        }
+        if ((ignored_columns & LSP_IGNORE_EXTERNAL_IDS) &&
+            col == NBREC_LOGICAL_SWITCH_PORT_COL_EXTERNAL_IDS) {
             continue;
         }
         return true;
@@ -5571,17 +5637,67 @@ check_lsp_changes_other_than_up__(
 static bool
 check_lsp_changes_other_than_up(const struct nbrec_logical_switch_port *nbsp)
 {
-    return check_lsp_changes_other_than_up__(nbsp, false);
+    return check_lsp_changes_other_than_up__(nbsp, LSP_IGNORE_NONE);
 }
 
-/* Like check_lsp_changes_other_than_up(), but also ignores a change to the
- * "addresses" column, which ls_router_port_handle_addrs_change() reprocesses
- * in place for a port of type "router". */
+/* Returns true if the NB "options" of the port of type "router" 'op' differ
+ * from the ones it was last initialized with, disregarding the keys that
+ * northd does not read for such a port. */
 static bool
-check_lsp_changes_other_than_up_and_addrs(
-    const struct nbrec_logical_switch_port *nbsp)
+check_router_lsp_options_changes(
+    const struct ovn_port *op, const struct nbrec_logical_switch_port *nbsp)
 {
-    return check_lsp_changes_other_than_up__(nbsp, true);
+    size_t n_relevant = 0;
+
+    const struct smap_node *node;
+    SMAP_FOR_EACH (node, &nbsp->options) {
+        if (lsp_router_option_is_irrelevant(node->key)) {
+            continue;
+        }
+        const char *cached = smap_get(&op->router_lsp_options, node->key);
+        if (!cached || strcmp(cached, node->value)) {
+            return true;
+        }
+        n_relevant++;
+    }
+
+    /* 'op->router_lsp_options' holds no irrelevant key, so a mismatching
+     * count means that a relevant key was removed. */
+    return n_relevant != smap_count(&op->router_lsp_options);
+}
+
+/* Returns true if the changed logical switch port 'nbsp' of type "router",
+ * currently represented by 'op', changed in a way that the incremental path
+ * can't handle in place, i.e. in any way other than:
+ *
+ *   - the "up" column, which does not affect router-port flows;
+ *
+ *   - the "addresses" column, which ls_router_port_handle_addrs_change()
+ *     reprocesses;
+ *
+ *   - the "external_ids" column, which northd only mirrors into the SB port
+ *     binding (see ovn_port_update_sbrec());
+ *
+ *   - keys of the "options" column that northd never reads for a port of type
+ *     "router" (see lsp_router_option_is_irrelevant()).
+ *
+ * The last two are what Neutron keeps rewriting on the switch side of a router
+ * gateway port ("neutron:revision_number", "neutron:host_id",
+ * "requested-chassis") long after the port is set up. */
+static bool
+check_router_lsp_changes(const struct ovn_port *op,
+                         const struct nbrec_logical_switch_port *nbsp)
+{
+    if (check_lsp_changes_other_than_up__(nbsp,
+                                          LSP_IGNORE_ADDRESSES |
+                                          LSP_IGNORE_OPTIONS |
+                                          LSP_IGNORE_EXTERNAL_IDS)) {
+        return true;
+    }
+
+    return nbrec_logical_switch_port_is_updated(
+               nbsp, NBREC_LOGICAL_SWITCH_PORT_COL_OPTIONS) &&
+           check_router_lsp_options_changes(op, nbsp);
 }
 
 static bool
@@ -5860,14 +5976,20 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                      * "l3gateway", ...) never matches its NB type ("router"),
                      * so lsp_is_type_changed() can't be used here.  Re-wiring
                      * the peer relationship on reinit is not supported, so
-                     * fall back to recompute on any change other than the
-                     * "up" and "addresses" columns; an "up"-only change does
-                     * not affect router-port flows, so ignore it. */
+                     * fall back to recompute on any change that
+                     * check_router_lsp_changes() does not vouch for. */
                     if (!op->lsp_can_be_inc_processed ||
                         !lsp_can_be_inc_processed(new_nbsp) ||
-                        check_lsp_changes_other_than_up_and_addrs(new_nbsp)) {
+                        check_router_lsp_changes(op, new_nbsp)) {
                         goto fail;
                     }
+                    /* Port_Binding.external_ids mirrors the NB column for
+                     * every LSP, router-type included, and nothing else in
+                     * northd reads it, so such a change only calls for a
+                     * resync of the SB row. */
+                    bool resync_sb = nbrec_logical_switch_port_is_updated(
+                        new_nbsp, NBREC_LOGICAL_SWITCH_PORT_COL_EXTERNAL_IDS);
+
                     if (nbrec_logical_switch_port_is_updated(
                             new_nbsp,
                             NBREC_LOGICAL_SWITCH_PORT_COL_ADDRESSES)) {
@@ -5877,12 +5999,22 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                                           new_nbsp->name)) {
                             goto fail;
                         }
+                        /* This resyncs the SB row too. */
                         ls_router_port_handle_addrs_change(
                             op, ovnsb_idl_txn, ni->sbrec_mirror_table,
                             ni->sbrec_chassis_by_name,
                             ni->sbrec_chassis_by_hostname,
                             ni->sbrec_encap_by_ip);
                         add_op_to_northd_tracked_ports(&trk_lsps->updated, op);
+                    } else if (resync_sb) {
+                        /* Leave the flows -- and the tracked data that would
+                         * make the lflow node reprocess them -- alone. */
+                        ovn_port_update_sbrec(ovnsb_idl_txn,
+                                              ni->sbrec_chassis_by_name,
+                                              ni->sbrec_chassis_by_hostname,
+                                              NULL, ni->sbrec_mirror_table,
+                                              ni->sbrec_encap_by_ip, op, NULL,
+                                              NULL);
                     }
                     op->visited = true;
                     continue;

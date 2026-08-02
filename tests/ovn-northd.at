@@ -12504,6 +12504,140 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP incremental processing of router port metadata])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl --wait=sb lsp-add ls0 ls0-lr0 \
+    -- lsp-set-type ls0-lr0 router \
+    -- lsp-set-options ls0-lr0 router-port=lr0-ls0 \
+    -- lsp-set-addresses ls0-lr0 router
+
+# options:requested-chassis is only read for a VIF, so setting it on a port of
+# type "router" changes nothing northd generates: the change is absorbed by the
+# northd node and no downstream node runs at all.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port ls0-lr0 \
+    options:requested-chassis=hv1
+check_engine_compute northd incremental
+# The lflow node is still computed, but only through the noop handler for its
+# en_datapath_sync input; nothing was regenerated and no port binding resynced.
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+AT_CHECK([ovn-sbctl --bare --columns=type,options list port_binding ls0-lr0],
+[0], [dnl
+patch
+peer=lr0-ls0
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Same for a later change of its value, and for its removal.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port ls0-lr0 \
+    options:requested-chassis=hv2
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb remove Logical_Switch_Port ls0-lr0 options \
+    requested-chassis
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# external_ids are mirrored into the SB port binding and read nowhere else, so
+# the row is resynced without regenerating any logical flow.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb add Logical_Switch_Port ls0-lr0 external_ids \
+    \"neutron:revision_number\"=4
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+AT_CHECK([ovn-sbctl --bare --columns=external_ids list port_binding ls0-lr0],
+[0], [dnl
+neutron:revision_number=4
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# "neutron:port_name" is additionally mirrored as "name".
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb add Logical_Switch_Port ls0-lr0 external_ids \
+    \"neutron:port_name\"=gw
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+AT_CHECK([ovn-sbctl --bare --columns=external_ids list port_binding ls0-lr0 | \
+    tr ' ' '\n' | sort], [0], [dnl
+name=gw
+neutron:port_name=gw
+neutron:revision_number=4
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Both kinds of change in a single transaction, which is how Neutron writes
+# them, are ignored together.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb add Logical_Switch_Port ls0-lr0 external_ids \
+    \"neutron:host_id\"=hv1 \
+    -- set Logical_Switch_Port ls0-lr0 options:requested-chassis=hv1
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# An option that northd does read for a router port is not ignored: the
+# nat-addresses of the port feed Port_Binding.nat_addresses.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port ls0-lr0 \
+    options:nat-addresses=router
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Nor is it when it changes together with an ignored one.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port ls0-lr0 \
+    options:exclude-lb-vips-from-garp=true options:requested-chassis=hv2
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Removing such an option is not ignored either.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb remove Logical_Switch_Port ls0-lr0 options \
+    nat-addresses
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A column that is neither "up", "addresses", "external_ids" nor "options"
+# still falls back to a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port ls0-lr0 enabled=false
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
 AT_SETUP([Virtual port incremental processing])
 AT_KEYWORDS([incremental processing])
 ovn_start
