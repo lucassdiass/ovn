@@ -753,6 +753,15 @@ struct ovn_port {
     bool lsp_can_be_inc_processed; /* If it can be incrementally processed when
                                       the port changes. */
 
+    /* For a logical switch port of type "router" only: a copy of the NB
+     * "options" of the port as of the last time it was (re)initialized, with
+     * the keys that northd never reads for such a port left out (see
+     * lsp_router_option_is_irrelevant()).  The IDL updates the NB row in
+     * place, so this is the only way for the incremental path to tell an
+     * options change that has to be reprocessed from one that has no effect
+     * at all.  Empty for any other port. */
+    struct smap router_lsp_options;
+
     /* Logical router port data. */
     const struct nbrec_logical_router_port *nbrp; /* May be NULL. */
 
