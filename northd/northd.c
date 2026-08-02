@@ -4947,6 +4947,21 @@ virtual_lsp_needs_recompute(struct ovn_datapath *od, const char *lport)
 }
 
 
+/* Like ls_has_localnet_port(), but derived from the northbound row instead of
+ * from od->localnet_ports, so that the answer does not depend on whether a
+ * localnet port added in the same transaction happens to have been processed
+ * already.  A full recompute always sees the northbound state. */
+static bool
+ls_nb_has_localnet_port(const struct ovn_datapath *od)
+{
+    for (size_t i = 0; i < od->nbs->n_ports; i++) {
+        if (lsp_is_localnet(od->nbs->ports[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* A logical switch port of type "router" is not self-contained: in a full
  * recompute join_logical_ports() wires a peer relationship to the logical
  * router port (LRP) and populates aggregate datapath state (see
@@ -5006,20 +5021,50 @@ router_lsp_needs_recompute(struct ovn_datapath *od,
         return true;
     }
 
-    /* Distributed gateway / gateway-router complexity: l3gateway and
-     * chassisredirect SB port types, GARP nat_addresses, cr_port. */
-    if (lrp_is_l3dgw(peer) || peer->cr_port ||
-        !vector_is_empty(&peer->od->l3dgw_ports) ||
-        peer->od->is_gw_router ||
+    /* A gateway router gives the switch port the "l3gateway" SB type and pulls
+     * in the chassis-wide handling that goes with it. */
+    if (peer->od->is_gw_router ||
         smap_get(&peer->od->nbr->options, "chassis")) {
+        return true;
+    }
+
+    /* A distributed gateway port (DGP) peer is supported on creation only, by
+     * ls_router_port_wire_dgp_peer().  Removing the peer of a DGP would have
+     * to undo more than the peer wiring, which this path does not do. */
+    if (peer->nbrp->n_gateway_chassis || peer->nbrp->ha_chassis_group) {
+        if (is_delete || !lrp_is_l3dgw(peer)) {
+            return true;
+        }
+
+        /* With more than one DGP on the router the DGPs generate flows for
+         * each other. */
+        if (vector_len(&peer->od->l3dgw_ports) > 1) {
+            return true;
+        }
+
+        /* Only a switch that already has a localnet port -- the shape Neutron
+         * gives an external network -- is supported.  Without one,
+         * peer_needs_cr_port_creation() turns true and the switch port gets a
+         * chassisredirect port of its own, which in turn makes
+         * build_lrouter_nat_arp_nd_flow() answer ARP/ND for the router's NAT
+         * external IPs through flows owned by the router's lr_stateful
+         * record, a reference this path can't have regenerated. */
+        if (!ls_nb_has_localnet_port(od)) {
+            return true;
+        }
+    } else if (!vector_is_empty(&peer->od->l3dgw_ports) || peer->cr_port) {
+        /* The peer is a regular port of a router that has a distributed
+         * gateway port elsewhere.  Its own ARP/ND responder flows also gain
+         * is_chassis_resident() checks once it has a peer switch port with a
+         * localnet port (see build_lrouter_ipv4_ip_input()), and only a peer
+         * that is itself a DGP is re-tracked below. */
         return true;
     }
 
     /* NAT, static routes, LBs and dynamic routing on the peer router pull in
      * stateful/routable/advertised-route dependencies not tracked here. */
     const struct nbrec_logical_router *nbr = peer->od->nbr;
-    if (nbr->n_nat || nbr->n_static_routes || nbr->n_load_balancer ||
-        nbr->n_load_balancer_group) {
+    if (nbr->n_load_balancer || nbr->n_load_balancer_group) {
         return true;
     }
     if (peer->od->dynamic_routing ||
@@ -5111,6 +5156,38 @@ ls_router_port_add_peer_networks(struct ovn_port *op)
             break;
         }
     }
+}
+
+/* Complete the peering of a freshly created logical switch port of type
+ * "router" whose peer logical router port is a distributed gateway port (DGP).
+ * A full recompute derives this state in join_logical_ports() once both ends
+ * are known.
+ *
+ * Note that nothing here turns the peer into a DGP -- an LRP with gateway
+ * columns is already one before it has a peer (see join_logical_ports_lrp()
+ * and lr_port_make_dgp()); what changes now is only what depends on the DGP
+ * having a peer switch port. */
+static void
+ls_router_port_wire_dgp_peer(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                             const struct northd_input *ni,
+                             struct northd_data *nd, struct ovn_port *op)
+{
+    /* Only used for the router type LSP whose peer is l3dgw_port. */
+    op->enable_router_port_acl = smap_get_bool(&op->nbsp->options,
+                                               "enable_router_port_acl",
+                                               false);
+
+    /* ls_port_init() synced the switch port's binding before
+     * "enable_router_port_acl" was known. */
+    ovn_port_update_sbrec(ovnsb_idl_txn, ni->sbrec_chassis_by_name,
+                          ni->sbrec_chassis_by_hostname, NULL,
+                          ni->sbrec_mirror_table, ni->sbrec_encap_by_ip, op,
+                          NULL, NULL);
+
+    /* The DGP's ARP/ND responder and ip-input flows gain is_chassis_resident()
+     * checks once it has a peer switch port on a switch with a localnet port;
+     * they are owned by the DGP's own lflow_ref. */
+    add_op_to_northd_tracked_ports(&nd->trk_data.trk_lrps.updated, op->peer);
 }
 
 /* Tear down the peer relationship wired by ls_router_port_wire_peer() when a
@@ -5940,6 +6017,10 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                     /* A router port was added to od->router_ports; sibling
                      * ports' ARP-resolve flows must be regenerated. */
                     router_ports_changed = true;
+                    if (lrp_is_l3dgw(op->peer)) {
+                        ls_router_port_wire_dgp_peer(ovnsb_idl_txn, ni, nd,
+                                                     op);
+                    }
                 }
             } else if (ls_port_has_changed(new_nbsp)) {
                 /* Existing port updated */
@@ -5968,6 +6049,10 @@ ls_handle_lsp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                              * sibling ports' ARP-resolve flows must be
                              * regenerated. */
                             router_ports_changed = true;
+                            if (lrp_is_l3dgw(op->peer)) {
+                                ls_router_port_wire_dgp_peer(ovnsb_idl_txn,
+                                                             ni, nd, op);
+                            }
                         }
                         op->visited = true;
                         continue;

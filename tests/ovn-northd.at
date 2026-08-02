@@ -12638,6 +12638,211 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP incremental processing of a router gateway port])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-sbctl chassis-add hv1 geneve 10.0.0.1
+
+# A tenant network and its router, as Neutron builds them.
+check ovn-nbctl ls-add ls0
+check ovn-nbctl lr-add lr0
+check ovn-nbctl lrp-add lr0 lrp-int 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl lsp-add ls0 ls0-lr0 \
+    -- lsp-set-type ls0-lr0 router \
+    -- lsp-set-options ls0-lr0 router-port=lrp-int \
+    -- lsp-set-addresses ls0-lr0 router
+check ovn-nbctl lsp-add ls0 vm1 \
+    -- lsp-set-addresses vm1 "aa:aa:aa:00:00:01 192.168.0.11"
+
+# The external network, always a localnet one.
+check ovn-nbctl ls-add public
+check ovn-nbctl lsp-add public ln-public \
+    -- lsp-set-type ln-public localnet \
+    -- lsp-set-addresses ln-public unknown \
+    -- lsp-set-options ln-public network_name=phys
+
+# The router side of the gateway, with SNAT, a distributed NAT and a default
+# route.
+check ovn-nbctl lrp-add lr0 lrp-gw 00:00:00:00:ee:01 172.16.1.10/24
+check ovn-nbctl lrp-set-gateway-chassis lrp-gw hv1 20
+check ovn-nbctl lr-nat-add lr0 snat 172.16.1.10 192.168.0.0/24
+check ovn-nbctl --gateway-port lrp-gw lr-nat-add lr0 dnat_and_snat \
+    172.16.1.20 192.168.0.11 vm1 30:54:00:00:00:03
+check ovn-nbctl --wait=sb lr-route-add lr0 0.0.0.0/0 172.16.1.1
+
+# Without a peer, the distributed gateway port answers ARP for its network
+# unconditionally.
+AT_CHECK([ovn-sbctl dump-flows lr0 | grep lr_in_ip_input | \
+    grep 'arp.spa == 172.16.1.0/24' | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_ip_input     ), priority=90   , match=(inport == "lrp-gw" && arp.op == 1 && arp.tpa == 172.16.1.10 && arp.spa == 172.16.1.0/24), action=(eth.dst = eth.src; eth.src = xreg0[[0..47]]; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = xreg0[[0..47]]; arp.tpa <-> arp.spa; outport = inport; flags.loopback = 1; output;)
+])
+
+# Neutron writes the switch side of the gateway port in two transactions.  The
+# first one creates a plain VIF.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add public gw-port \
+    -- lsp-set-addresses gw-port unknown \
+    -- set Logical_Switch_Port gw-port options:requested-chassis=hv1
+check_engine_compute northd incremental
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The second one turns it into the peer of the distributed gateway port.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port gw-port type=router \
+    options:router-port=lrp-gw options:nat-addresses=router \
+    options:exclude-lb-vips-from-garp=true addresses="router unknown"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb incremental
+
+# The peer relationship is wired in both directions and the switch port is
+# bound as a patch port.
+AT_CHECK([ovn-sbctl --bare --columns=type,options list port_binding gw-port],
+[0], [dnl
+patch
+peer=lrp-gw
+])
+AT_CHECK([ovn-sbctl --bare --columns=options list port_binding lrp-gw], [0],
+[dnl
+chassis-redirect-port=cr-lrp-gw peer=gw-port
+])
+
+# The switch gets no chassisredirect port of its own: it has a localnet port,
+# so peer_needs_cr_port_creation() is false.
+AT_CHECK([ovn-sbctl --bare --columns=logical_port list port_binding | \
+    grep '^cr-' | sort], [0], [dnl
+cr-lrp-gw
+])
+
+# GARPs for the router IP and for the NAT external IPs are announced through
+# the new port binding.
+AT_CHECK([ovn-sbctl --bare --columns=nat_addresses list port_binding gw-port | \
+    tr ' ' '\n' | sort -u], [0], [dnl
+00:00:00:00:ee:01
+172.16.1.10
+172.16.1.20
+30:54:00:00:00:03
+is_chassis_resident("cr-lrp-gw")
+is_chassis_resident("vm1")
+])
+
+# Now that the distributed gateway port has a peer on a localnet switch, it
+# only answers ARP where its chassisredirect port lives.
+AT_CHECK([ovn-sbctl dump-flows lr0 | grep lr_in_ip_input | \
+    grep 'arp.spa == 172.16.1.0/24' | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_ip_input     ), priority=90   , match=(inport == "lrp-gw" && arp.op == 1 && arp.tpa == 172.16.1.10 && arp.spa == 172.16.1.0/24 && is_chassis_resident("cr-lrp-gw")), action=(eth.dst = eth.src; eth.src = xreg0[[0..47]]; arp.op = 2; /* ARP reply */ arp.tha = arp.sha; arp.sha = xreg0[[0..47]]; arp.tpa <-> arp.spa; outport = inport; flags.loopback = 1; output;)
+])
+
+# The switch reaches the router through the new port.
+AT_CHECK([ovn-sbctl dump-flows public | grep ls_in_l2_lkup | \
+    grep '00:00:00:00:ee:01' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_lkup      ), priority=50   , match=(eth.dst == 00:00:00:00:ee:01 && is_chassis_resident("cr-lrp-gw")), action=(outport = "gw-port"; output;)
+  table=??(ls_in_l2_lkup      ), priority=75   , match=(eth.src == {00:00:00:00:ee:01, 30:54:00:00:00:03} && eth.dst == ff:ff:ff:ff:ff:ff && (arp.op == 1 || rarp.op == 3 || nd_ns)), action=(outport = "_MC_flood_l2"; output;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The same port created as a "router" one in a single transaction, with an HA
+# chassis group driving the gateway.
+check ovn-nbctl ls-add public1
+check ovn-nbctl lsp-add public1 ln-public1 \
+    -- lsp-set-type ln-public1 localnet \
+    -- lsp-set-addresses ln-public1 unknown \
+    -- lsp-set-options ln-public1 network_name=phys
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lrp-add lr1 lrp-gw1 00:00:00:00:dd:01 172.16.2.10/24
+check ovn-nbctl ha-chassis-group-add hagrp
+check ovn-nbctl ha-chassis-group-add-chassis hagrp hv1 30
+check ovn-nbctl --wait=sb set Logical_Router_Port lrp-gw1 \
+    ha_chassis_group=$(ovn-nbctl --bare --columns=_uuid find \
+                       ha_chassis_group name=hagrp)
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add public1 gw-port1 \
+    -- lsp-set-type gw-port1 router \
+    -- lsp-set-options gw-port1 router-port=lrp-gw1 \
+    -- lsp-set-addresses gw-port1 router
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=options list port_binding gw-port1], [0],
+[dnl
+peer=lrp-gw1
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Neither a NAT rule nor a static route on the peer router depends on the set
+# of switch ports peering with it, so connecting and disconnecting one is
+# handled on a router that has both.
+check ovn-nbctl ls-add ls4
+check ovn-nbctl lr-add lr4
+check ovn-nbctl lrp-add lr4 lr4-ls4 00:00:00:00:aa:01 192.168.4.1/24
+check ovn-nbctl lr-nat-add lr4 snat 172.16.5.10 192.168.4.0/24
+check ovn-nbctl --wait=sb lr-route-add lr4 10.0.0.0/24 192.168.4.2
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port ls4 ls4-lr4 lr4-ls4
+check_engine_compute northd incremental
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del ls4-lr4
+check_engine_compute northd incremental
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A switch without a localnet port is not handled: its port would need a
+# chassisredirect port of its own (peer_needs_cr_port_creation()), which makes
+# the router answer ARP/ND for its NAT external IPs through flows owned by the
+# router's lr_stateful record.
+check ovn-nbctl ls-add overlay
+check ovn-nbctl lr-add lr2
+check ovn-nbctl lrp-add lr2 lrp-gw2 00:00:00:00:cc:01 172.16.3.10/24
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lrp-gw2 hv1 20
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add overlay ov-gw \
+    -- lsp-set-type ov-gw router \
+    -- lsp-set-options ov-gw router-port=lrp-gw2 \
+    -- lsp-set-addresses ov-gw router
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Deleting the peer of a distributed gateway port is not handled either.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del gw-port1
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Neither is a port peering with a router that has two distributed gateway
+# ports.
+check ovn-nbctl ls-add public3
+check ovn-nbctl lsp-add public3 ln-public3 \
+    -- lsp-set-type ln-public3 localnet \
+    -- lsp-set-addresses ln-public3 unknown \
+    -- lsp-set-options ln-public3 network_name=phys
+check ovn-nbctl lrp-add lr2 lrp-gw3 00:00:00:00:cc:02 172.16.4.10/24
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lrp-gw3 hv1 20
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add public3 gw-port3 \
+    -- lsp-set-type gw-port3 router \
+    -- lsp-set-options gw-port3 router-port=lrp-gw3 \
+    -- lsp-set-addresses gw-port3 router
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
 AT_SETUP([Virtual port incremental processing])
 AT_KEYWORDS([incremental processing])
 ovn_start
