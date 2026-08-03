@@ -23545,6 +23545,17 @@ lflow_handle_lr_stateful_changes(struct lr_stateful_tracked_data *trk_data,
     struct ds match = DS_EMPTY_INITIALIZER;
     struct hmapx_node *hmapx_node;
 
+    /* A record goes away with its logical router.  The router's own ports are
+     * deleted with it (their stateful_lflow_ref is unlinked by
+     * lflow_handle_northd_lrp_changes()) and any peer switch port is tracked
+     * as updated, but the flows the record owns itself have to be dropped
+     * here. */
+    HMAPX_FOR_EACH (hmapx_node, &trk_data->deleted) {
+        lr_stateful_rec = hmapx_node->data;
+        lflow_ref_unlink_lflows(lr_stateful_rec->lflow_ref, lflows);
+        hmapx_add(dirty_lflow_refs, lr_stateful_rec->lflow_ref);
+    }
+
     HMAPX_FOR_EACH (hmapx_node, &trk_data->crupdated) {
         lr_stateful_rec = hmapx_node->data;
         /* Unlink old lflows. */
