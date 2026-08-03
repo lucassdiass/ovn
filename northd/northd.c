@@ -4983,21 +4983,48 @@ ls_nb_has_localnet_port(const struct ovn_datapath *od)
     return false;
 }
 
-/* A logical switch port of type "router" is not self-contained: in a full
- * recompute join_logical_ports() wires a peer relationship to the logical
- * router port (LRP) and populates aggregate datapath state (see
- * ls_router_port_wire_peer()).  Several flows that toggle with the presence of
- * such a port are owned by lflow_refs other than the port's own (the peer
- * LRP's ref, the ls_stateful ref, the switch datapath ref, ...), which the
- * incremental LSP path does not keep in sync.  Return true when any such
- * dependency is present so the caller falls back to a full recompute.
+/* A switch may hold several router ports, but only if all of them peer with
+ * LRPs of the same logical router 'lr_od': a switch connecting two distinct
+ * routers merges them into a single logical router group (see
+ * build_lrouter_groups()), which is computed on a full recompute only.
+ * Staying within one router also means the peer-router checks of the callers
+ * cover every router port of the switch.
  *
- * 'is_delete' is true when 'nbsp' is being removed (the port is still counted
- * in od->router_ports at this point). */
+ * The flows that the router ports generate for each other (the
+ * inter-router-port ARP-resolve flows of build_arp_resolve_flows_for_lsp())
+ * are owned by the sibling ports' own lflow_refs; ls_handle_lsp_changes()
+ * re-tracks those siblings so that the lflow engine regenerates them.
+ *
+ * 'nbsp' is the switch port whose peering is being wired up or torn down; it
+ * is skipped, since on a tear-down it is still counted in
+ * ls_od->router_ports. */
 static bool
-router_lsp_needs_recompute(struct ovn_datapath *od,
-                           const struct nbrec_logical_switch_port *nbsp,
-                           const struct hmap *lr_ports, bool is_delete)
+ls_router_ports_share_peer_router(
+    const struct ovn_datapath *ls_od, const struct ovn_datapath *lr_od,
+    const struct nbrec_logical_switch_port *nbsp)
+{
+    struct ovn_port *rp;
+
+    VECTOR_FOR_EACH (&ls_od->router_ports, rp) {
+        if (rp->nbsp == nbsp) {
+            continue;
+        }
+        if (!rp->peer || rp->peer->od != lr_od) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* The dependencies a logical switch port of type "router" pulls in from its
+ * own logical switch, as opposed to from the logical router port it peers
+ * with.  Both halves of the peering -- the switch port path and the router port
+ * path -- have to respect them, since either one can be the side that wires the
+ * relationship up or tears it down. */
+static bool
+router_lsp_switch_needs_recompute(
+    struct ovn_datapath *od, const struct nbrec_logical_switch_port *nbsp)
 {
     /* arp_proxy adds proxy-arp admission flows owned by the peer LRP's
      * lflow_ref and sets od->has_arp_proxy_port. */
@@ -5014,6 +5041,31 @@ router_lsp_needs_recompute(struct ovn_datapath *od,
      * lflow_handle_northd_port_changes(). */
     if (od->nbs->n_load_balancer ||
         od->nbs->n_load_balancer_group || od->has_vtep_lports) {
+        return true;
+    }
+
+    return false;
+}
+
+/* A logical switch port of type "router" is not self-contained: in a full
+ * recompute join_logical_ports() wires a peer relationship to the logical
+ * router port (LRP) and populates aggregate datapath state (see
+ * ls_router_port_wire_peer()).  Several flows that toggle with the presence of
+ * such a port are owned by lflow_refs other than the port's own (the peer
+ * LRP's ref, the ls_stateful ref, the switch datapath ref, ...), which the
+ * incremental LSP path does not keep in sync.  Return true when any such
+ * dependency is present so the caller falls back to a full recompute.
+ *
+ * 'is_delete' is true when 'nbsp' is being removed (the port is still counted
+ * in od->router_ports at this point). */
+static bool
+router_lsp_needs_recompute(struct ovn_datapath *od,
+                           const struct nbrec_logical_switch_port *nbsp,
+                           const struct hmap *lr_ports, bool is_delete)
+{
+    /* The dependencies of the switch that owns the port, which apply whichever
+     * side of the peering is being processed. */
+    if (router_lsp_switch_needs_recompute(od, nbsp)) {
         return true;
     }
 
@@ -5043,27 +5095,10 @@ router_lsp_needs_recompute(struct ovn_datapath *od,
         return true;
     }
 
-    /* A switch may hold several router ports, but only if all of them peer
-     * with LRPs of the same logical router: a switch connecting two distinct
-     * routers merges them into a single logical router group (see
-     * build_lrouter_groups()), which is computed on a full recompute only.
-     * Staying within one router also means the peer-router checks below cover
-     * every router port of the switch.
-     *
-     * The flows that the router ports generate for each other (the
-     * inter-router-port ARP-resolve flows of
-     * build_arp_resolve_flows_for_lsp()) are owned by the sibling ports' own
-     * lflow_refs; ls_handle_lsp_changes() re-tracks those siblings so that the
-     * lflow engine regenerates them. */
-    struct ovn_port *rp;
-    VECTOR_FOR_EACH (&od->router_ports, rp) {
-        if (rp->nbsp == nbsp) {
-            /* The port being deleted, still in od->router_ports. */
-            continue;
-        }
-        if (!rp->peer || rp->peer->od != peer->od) {
-            return true;
-        }
+    /* Every other router port of the switch has to peer with the same router
+     * as this one. */
+    if (!ls_router_ports_share_peer_router(od, peer->od, nbsp)) {
+        return true;
     }
 
     /* A gateway router gives the switch port the "l3gateway" SB type and pulls
@@ -5443,6 +5478,110 @@ ls_router_port_handle_addrs_change(
                           sbrec_encap_by_ip, op, NULL, NULL);
 }
 
+/* The set of router ports of the logical switch 'ls_od' changed from the
+ * router side.  Re-track every switch port of it:
+ * build_arp_resolve_flows_for_lsp() walks od->router_ports for each of them
+ * and owns the flows it adds to the peer routers' pipelines through the
+ * switch port's own lflow_ref.  Mirror of what ls_handle_lsp_changes() does
+ * when the change comes from the switch side. */
+static void
+ls_retrack_ports_for_router_ports(struct northd_data *nd,
+                                  struct ovn_datapath *ls_od)
+{
+    struct tracked_ovn_ports *trk_lsps = &nd->trk_data.trk_lsps;
+    struct ovn_port *op;
+
+    HMAP_FOR_EACH (op, dp_node, &ls_od->ports) {
+        if (!hmapx_contains(&trk_lsps->created, op) &&
+            !hmapx_contains(&trk_lsps->deleted, op)) {
+            add_op_to_northd_tracked_ports(&trk_lsps->updated, op);
+        }
+    }
+}
+
+/* Wire the peer relationship between the just created logical router port 'op'
+ * and the logical switch port of type "router" 'lsp' that was already there
+ * naming it in options:router-port.  Mirror of ls_router_port_wire_peer(),
+ * which does the same when the switch port is the side that shows up last.
+ *
+ * Everything of the switch port that starts depending on the peer is redone:
+ * the "router" entry of its addresses, its SB port binding and the flows of
+ * its own lflow_ref, of its switch's 'datapath_lflows' and of its switch's
+ * ls_stateful record (which iterate od->router_ports). */
+static void
+lr_port_wire_peer_lsp(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                      const struct northd_input *ni, struct northd_data *nd,
+                      struct ovn_port *op, struct ovn_port *lsp)
+{
+    vector_push(&lsp->od->router_ports, &lsp);
+    vector_push(&op->od->ls_peers, &lsp->od);
+    lsp->peer = op;
+    op->peer = lsp;
+
+    /* Only used for the router type LSP whose peer is l3dgw_port.  'op' is
+     * one already when it comes with a router that is itself new (see
+     * lr_port_add_cr_port()). */
+    lsp->enable_router_port_acl =
+        lrp_is_l3dgw(op) &&
+        smap_get_bool(&lsp->nbsp->options, "enable_router_port_acl", false);
+
+    ls_router_port_handle_addrs_change(lsp, ovnsb_idl_txn,
+                                      ni->sbrec_mirror_table,
+                                      ni->sbrec_chassis_by_name,
+                                      ni->sbrec_chassis_by_hostname,
+                                      ni->sbrec_encap_by_ip);
+    add_op_to_northd_tracked_ports(&nd->trk_data.trk_lsps.updated, lsp);
+    hmapx_add(&nd->trk_data.trk_switches.crupdated, lsp->od);
+    ls_retrack_ports_for_router_ports(nd, lsp->od);
+}
+
+/* Tear the same relationship down when the logical router port 'op' goes away.
+ * Mirror of ls_router_port_unwire_peer().  'op->peer' is left set: the port
+ * itself is being deleted, and its SB row goes with it, so nothing reads it
+ * again. */
+static void
+lr_port_unwire_peer_lsp(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                        const struct northd_input *ni, struct northd_data *nd,
+                        struct ovn_port *op)
+{
+    struct ovn_port *lsp = op->peer;
+    struct ovn_datapath *ls_od;
+    struct ovn_port *rp;
+    size_t i = 0;
+
+    VECTOR_FOR_EACH (&lsp->od->router_ports, rp) {
+        if (rp == lsp) {
+            vector_remove(&lsp->od->router_ports, i, NULL);
+            break;
+        }
+        i++;
+    }
+
+    i = 0;
+    VECTOR_FOR_EACH (&op->od->ls_peers, ls_od) {
+        if (ls_od == lsp->od) {
+            vector_remove(&op->od->ls_peers, i, NULL);
+            break;
+        }
+        i++;
+    }
+
+    lsp->peer = NULL;
+    lsp->enable_router_port_acl = false;
+
+    /* Without a peer the "router" entry of the switch port's addresses
+     * resolves to nothing and its SB options:peer falls back to the
+     * options:router-port string, exactly as a recompute leaves them. */
+    ls_router_port_handle_addrs_change(lsp, ovnsb_idl_txn,
+                                      ni->sbrec_mirror_table,
+                                      ni->sbrec_chassis_by_name,
+                                      ni->sbrec_chassis_by_hostname,
+                                      ni->sbrec_encap_by_ip);
+    add_op_to_northd_tracked_ports(&nd->trk_data.trk_lsps.updated, lsp);
+    hmapx_add(&nd->trk_data.trk_switches.crupdated, lsp->od);
+    ls_retrack_ports_for_router_ports(nd, lsp->od);
+}
+
 /* Find the logical router port 'nbrp' among the ports of the logical router
  * datapath 'od'.  Mirror of ovn_port_find_in_datapath() for LRPs. */
 static struct ovn_port *
@@ -5534,14 +5673,19 @@ lrp_affects_static_routes(const struct hmap *lr_datapaths,
  * relationship (to a "router" LSP) and generates flows owned by lflow_refs
  * other than the port's own.  Return true when the LRP pulls in a dependency
  * that this incremental path does not keep in sync, so the caller falls back
- * to a full recompute. */
+ * to a full recompute.
+ *
+ * This is the per-port half; the dependencies of the router that owns the port
+ * are in lrp_router_needs_recompute().  'lr_as_a_whole' is true when the port
+ * comes or goes along with its router (see lr_as_a_whole_needs_recompute()).
+ */
 static bool
-lrp_needs_recompute(struct ovn_datapath *od,
-                    const struct nbrec_logical_router_port *nbrp,
-                    const struct lport_addresses *networks,
-                    const struct hmap *ls_ports,
-                    const struct hmap *lr_datapaths,
-                    const struct nbrec_static_mac_binding_table *nb_smb_table)
+lrp_port_needs_recompute(
+    const struct ovn_datapath *od,
+    const struct nbrec_logical_router_port *nbrp,
+    const struct hmap *ls_ports,
+    const struct nbrec_static_mac_binding_table *nb_smb_table,
+    bool lr_as_a_whole)
 {
     /* A Static_MAC_Binding referencing this port is synced to the SB by
      * build_static_mac_binding_table(), which only runs on a full northd
@@ -5554,10 +5698,34 @@ lrp_needs_recompute(struct ovn_datapath *od,
         }
     }
 
-    /* Distributed gateway ports / cr-ports (gateway_chassis, ha_chassis_group)
-     * pull in chassisredirect handling not supported here. */
+    /* A distributed gateway port (gateway_chassis, ha_chassis_group) pulls in
+     * a chassisredirect port, an entry in od->l3dgw_ports and flows of the
+     * router's other ports that depend on both.  Only a router that comes or
+     * goes as a whole gets those built from scratch -- the other ports and the
+     * router's lr_nat and lr_stateful records come or go along with it -- so a
+     * single port is not supported (the transition of an existing one is, see
+     * lrp_becomes_dgp_needs_recompute()). */
+    struct ovn_port *peer_lsp = lrp_find_peer_lsp(ls_ports, nbrp);
     if (nbrp->n_gateway_chassis || nbrp->ha_chassis_group) {
-        return true;
+        if (!lr_as_a_whole) {
+            return true;
+        }
+
+        /* The cr-port shares the LRP's NB row, so it would request the same
+         * tunnel key and conflict with it. */
+        if (smap_get_int(&nbrp->options, "requested-tnl-key", 0)) {
+            return true;
+        }
+
+        /* Only a peer switch that has a localnet port -- the shape Neutron
+         * gives an external network -- is supported.  Without one,
+         * peer_needs_cr_port_creation() can turn true and the switch port
+         * gets a chassisredirect port of its own, which this path neither
+         * creates nor deletes. */
+        if (peer_lsp &&
+            (peer_lsp->cr_port || !ls_nb_has_localnet_port(peer_lsp->od))) {
+            return true;
+        }
     }
 
     /* LRP-to-LRP peering, disabled ports, prefix delegation, redirect-type and
@@ -5575,22 +5743,53 @@ lrp_needs_recompute(struct ovn_datapath *od,
         return true;
     }
 
+    /* An already-present peer "router" LSP is wired up (or torn down) from
+     * this side by lr_port_wire_peer_lsp() / lr_port_unwire_peer_lsp(), but
+     * only when its own switch allows the same operation the LSP path would
+     * (see router_lsp_needs_recompute(), which is the other half of this). */
+    if (peer_lsp &&
+        (router_lsp_switch_needs_recompute(peer_lsp->od, peer_lsp->nbsp) ||
+         !ls_router_ports_share_peer_router(peer_lsp->od, od,
+                                            peer_lsp->nbsp))) {
+        return true;
+    }
+
+    return false;
+}
+
+/* The dependencies a logical router has on state that lives outside the
+ * lflow_refs of the port being added or removed, and that this incremental path
+ * does not keep in sync.  Checked when a single port of an otherwise unchanged
+ * router changes; a router that comes or goes as a whole is less restricted
+ * (see lr_as_a_whole_needs_recompute()). */
+static bool
+lrp_router_needs_recompute(struct ovn_datapath *od,
+                           const struct nbrec_logical_router_port *nbrp,
+                           const struct lport_addresses *networks,
+                           const struct hmap *ls_ports,
+                           const struct hmap *lr_datapaths)
+{
     /* Gateway-router complexity on this router. */
     if (od->is_gw_router || smap_get(&od->nbr->options, "chassis")) {
         return true;
     }
 
-    /* A distributed gateway port (DGP) elsewhere on the router is fine.  The
-     * set of DGPs does not change here, and the flows of the router that walk
-     * its ports alongside its DGPs either live on od->datapath_lflows (e.g.
+    /* A distributed gateway port (DGP) elsewhere on the router is fine as
+     * long as this port has no peer switch port.  The set of DGPs does not
+     * change here, and the flows of the router that walk its ports alongside
+     * its DGPs either live on od->datapath_lflows (e.g.
      * build_check_pkt_len_flows_for_lrouter() for a DGP with gateway_mtu),
-     * which lr_handle_lrp_changes() regenerates by re-tracking the router, or
-     * come from the lr_nat and lr_stateful records, which are refreshed
-     * through trk_nat_lrs for a router with NAT (see below).  What the port's
-     * own flows gain from a DGP, the is_chassis_resident() checks of
+     * which the caller regenerates by re-tracking the router, or come from
+     * the lr_nat and lr_stateful records, which are refreshed through
+     * trk_nat_lrs for a router with NAT (see below).  What the port's own
+     * flows gain from a DGP, the is_chassis_resident() checks of
      * build_lrouter_ipv4_ip_input() and friends, only applies once the port
-     * has a peer switch port with a localnet port, and a pre-existing peer
-     * falls back below. */
+     * has a peer switch port with a localnet port, and wiring up that peering
+     * on such a router is not supported (see router_lsp_needs_recompute()). */
+    if (!vector_is_empty(&od->l3dgw_ports) &&
+        lrp_find_peer_lsp(ls_ports, nbrp)) {
+        return true;
+    }
 
     /* Route policies, LBs and dynamic routing on this router pull in
      * routable/advertised-route/policy dependencies that live outside the
@@ -5615,7 +5814,9 @@ lrp_needs_recompute(struct ovn_datapath *od,
     }
 
     /* Static routes are fine as long as this port is not involved in the
-     * resolution of any of them. */
+     * resolution of any of them.  A router that comes or goes as a whole is
+     * exempt: its routes come and go with it (see
+     * lr_as_a_whole_needs_recompute()). */
     if (lrp_affects_static_routes(lr_datapaths, od, nbrp->name, networks)) {
         return true;
     }
@@ -5625,11 +5826,67 @@ lrp_needs_recompute(struct ovn_datapath *od,
         return true;
     }
 
-    /* Wiring an already-present peer "router" LSP from the LRP side is not
-     * supported; fall back to recompute.  The common ordering creates the LRP
-     * first (no peer yet), so the peer LSP is wired later by the incremental
-     * LSP path (ls_router_port_wire_peer()). */
-    if (lrp_find_peer_lsp(ls_ports, nbrp)) {
+    return false;
+}
+
+/* Both halves of the checks, for adding or removing a single logical router
+ * port of the router 'od'. */
+static bool
+lrp_needs_recompute(
+    struct ovn_datapath *od, const struct nbrec_logical_router_port *nbrp,
+    const struct lport_addresses *networks, const struct hmap *ls_ports,
+    const struct hmap *lr_datapaths,
+    const struct nbrec_static_mac_binding_table *nb_smb_table)
+{
+    return lrp_port_needs_recompute(od, nbrp, ls_ports, nb_smb_table, false)
+           || lrp_router_needs_recompute(od, nbrp, networks, ls_ports,
+                                         lr_datapaths);
+}
+
+/* The dependencies of a logical router that appears or disappears as a whole:
+ * created, deleted, or administratively enabled or disabled -- a recompute
+ * gives a disabled router no datapath at all, so northd sees those two as a
+ * creation and a deletion.
+ *
+ * Unlike for a single port change, NAT rules and static routes are fine here,
+ * because they come and go with the router: lr_nat_northd_handler() creates and
+ * drops the router's lr_nat record from the tracked routers, and
+ * routes_northd_change_handler() does the same for its parsed routes.
+ *
+ * So are distributed gateway ports, any number of them: every flow that
+ * depends on the router having one is owned by the router itself, by one of
+ * its ports or by one of the records above, all of which come and go with it
+ * too (see lrp_port_needs_recompute() for what stays out of scope). */
+static bool
+lr_as_a_whole_needs_recompute(struct ovn_datapath *od,
+                              const struct nbrec_logical_router *nbr)
+{
+    if (od->is_gw_router || smap_get(&nbr->options, "chassis")) {
+        return true;
+    }
+
+    /* Route policies have no incremental path of their own: only a recompute
+     * of en_route_policies picks them up.  Load balancers are tracked by
+     * en_lb_data from the northbound row, not from the router datapath. */
+    if (nbr->n_policies || nbr->n_load_balancer ||
+        nbr->n_load_balancer_group) {
+        return true;
+    }
+
+    if (od->dynamic_routing ||
+        od->dynamic_routing_redistribute != DRRM_NONE) {
+        return true;
+    }
+
+    if (od->mcast_info.rtr.relay) {
+        return true;
+    }
+
+    /* A router group spans the routers reachable through a logical switch, so
+     * one with more than this router in it would be left referencing a
+     * datapath that is going away, or would have to gain one.  Only a
+     * recompute builds groups. */
+    if (od->lr_group && od->lr_group->n_router_dps > 1) {
         return true;
     }
 
@@ -7084,6 +7341,59 @@ cr_port_create(struct ovsdb_idl_txn *ovnsb_txn, struct hmap *ports,
     return crp;
 }
 
+/* Derive the chassisredirect port of the distributed gateway port 'op' and
+ * record the DGP in od->l3dgw_ports, as join_logical_ports() does during a
+ * full recompute, then sync the cr-port's SB port binding, which owns the
+ * DGP's HA chassis group.  Returns NULL on failure. */
+static struct ovn_port *
+lr_port_add_cr_port(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                    const struct northd_input *ni, struct northd_data *nd,
+                    struct ovn_port *op, struct tracked_ovn_ports *trk_lrps,
+                    struct sset *active_ha_chassis_grps)
+{
+    struct ovn_port *crp = cr_port_create(ovnsb_idl_txn, &nd->lr_ports, op);
+    if (!crp) {
+        return NULL;
+    }
+
+    vector_push(&op->od->l3dgw_ports, &op);
+
+    ovn_port_update_sbrec(ovnsb_idl_txn, ni->sbrec_chassis_by_name,
+                          ni->sbrec_chassis_by_hostname,
+                          ni->sbrec_ha_chassis_grp_by_name,
+                          ni->sbrec_mirror_table, ni->sbrec_encap_by_ip,
+                          crp, NULL, active_ha_chassis_grps);
+    add_op_to_northd_tracked_ports(&trk_lrps->created, crp);
+    return crp;
+}
+
+/* Give the just created distributed gateway port 'op' of a router that is
+ * itself new its chassisredirect port.  A stale ovn_port that already holds
+ * the chassisredirect name is left for a recompute to reconcile.  Returns
+ * false on failure. */
+static bool
+lr_new_port_add_cr_port(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                        const struct northd_input *ni, struct northd_data *nd,
+                        struct ovn_port *op,
+                        struct tracked_ovn_ports *trk_lrps)
+{
+    char *redirect_name = ovn_chassis_redirect_name(op->nbrp->name);
+    bool taken = ovn_port_find(&nd->lr_ports, redirect_name);
+    free(redirect_name);
+    if (taken) {
+        return false;
+    }
+
+    /* Only ever grows here, so the stale-group cleanup that build_ports() does
+     * with this set has nothing to do (see lr_port_make_dgp()). */
+    struct sset active_ha_chassis_grps =
+        SSET_INITIALIZER(&active_ha_chassis_grps);
+    bool ok = lr_port_add_cr_port(ovnsb_idl_txn, ni, nd, op, trk_lrps,
+                                  &active_ha_chassis_grps);
+    sset_destroy(&active_ha_chassis_grps);
+    return ok;
+}
+
 /* Turn the existing regular logical router port 'op' into a distributed
  * gateway port, mirroring what join_logical_ports() does for one during a full
  * recompute: derive its chassisredirect port, record the DGP in
@@ -7109,14 +7419,14 @@ lr_port_make_dgp(struct ovsdb_idl_txn *ovnsb_idl_txn,
                         hmap_count(&nd->lr_datapaths.datapaths));
     }
 
-    struct ovn_port *crp = cr_port_create(ovnsb_idl_txn, &nd->lr_ports, op);
-    if (!crp) {
+    /* Must precede peer_needs_cr_port_creation(), which requires the router to
+     * have exactly one DGP, and the sync of the port binding derived from the
+     * peer switch port, which mirrors the 'ha_chassis_group' column of this
+     * cr-port's. */
+    if (!lr_port_add_cr_port(ovnsb_idl_txn, ni, nd, op, trk_lrps,
+                             &active_ha_chassis_grps)) {
         goto out;
     }
-
-    /* Must precede peer_needs_cr_port_creation(), which requires the router to
-     * have exactly one DGP. */
-    vector_push(&od->l3dgw_ports, &op);
 
     if (op->peer && op->peer->nbsp) {
         /* Only used for the router type LSP whose peer is l3dgw_port. */
@@ -7124,15 +7434,6 @@ lr_port_make_dgp(struct ovsdb_idl_txn *ovnsb_idl_txn,
             &op->peer->nbsp->options, "enable_router_port_acl", false);
     }
 
-    /* This cr-port's port binding owns the HA chassis group, so it has to be
-     * synced before the one derived from the peer switch port, which mirrors
-     * its 'ha_chassis_group' column. */
-    ovn_port_update_sbrec(ovnsb_idl_txn, ni->sbrec_chassis_by_name,
-                          ni->sbrec_chassis_by_hostname,
-                          ni->sbrec_ha_chassis_grp_by_name,
-                          ni->sbrec_mirror_table, ni->sbrec_encap_by_ip,
-                          crp, NULL, &active_ha_chassis_grps);
-    add_op_to_northd_tracked_ports(&trk_lrps->created, crp);
     lr_group_update_ha_chassis_groups(od->lr_group);
 
     if (peer_needs_cr_port_creation(op)) {
@@ -7225,7 +7526,7 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                       const struct nbrec_logical_router *changed_lr,
                       const struct northd_input *ni, struct northd_data *nd,
                       struct ovn_datapath *od,
-                      struct tracked_ovn_ports *trk_lrps)
+                      struct tracked_ovn_ports *trk_lrps, bool lr_is_new)
 {
     bool lr_deleted = nbrec_logical_router_is_deleted(changed_lr);
     bool lr_ports_changed = lr_deleted;
@@ -7271,10 +7572,16 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                     destroy_lport_addresses(&lrp_networks);
                     goto fail;
                 }
-                if (lrp_needs_recompute(od, new_nbrp, &lrp_networks,
-                                        &nd->ls_ports,
-                                        &nd->lr_datapaths.datapaths,
-                                        ni->nbrec_static_mac_binding_table)) {
+                /* The ports of a router that is itself new come with it, so
+                 * the router-wide dependencies were already vetted once by
+                 * lr_as_a_whole_needs_recompute(). */
+                if (lrp_port_needs_recompute(
+                        od, new_nbrp, &nd->ls_ports,
+                        ni->nbrec_static_mac_binding_table, lr_is_new) ||
+                    (!lr_is_new &&
+                     lrp_router_needs_recompute(
+                         od, new_nbrp, &lrp_networks, &nd->ls_ports,
+                         &nd->lr_datapaths.datapaths))) {
                     destroy_lport_addresses(&lrp_networks);
                     goto fail;
                 }
@@ -7294,6 +7601,26 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                  * regenerates them. */
                 hmapx_add(&nd->trk_data.trk_routers.crupdated, od);
                 lrp_created = true;
+
+                /* Only the ports of a router that is itself new get here as
+                 * distributed gateway ports (see lrp_port_needs_recompute()).
+                 * Their cr-ports have to be there before the peering is
+                 * wired, which reads lrp_is_l3dgw(). */
+                if (new_nbrp->n_gateway_chassis ||
+                    new_nbrp->ha_chassis_group) {
+                    if (!lr_new_port_add_cr_port(ovnsb_idl_txn, ni, nd, op,
+                                                 trk_lrps)) {
+                        goto fail;
+                    }
+                }
+
+                /* A switch port of type "router" naming this one may already
+                 * be there, waiting for it. */
+                struct ovn_port *peer_lsp =
+                    lrp_find_peer_lsp(&nd->ls_ports, new_nbrp);
+                if (peer_lsp) {
+                    lr_port_wire_peer_lsp(ovnsb_idl_txn, ni, nd, op, peer_lsp);
+                }
             } else if (nbrec_logical_router_port_row_get_seqno(
                            new_nbrp, OVSDB_IDL_CHANGE_MODIFY) > 0) {
                 /* The only modifications handled in place concern the gateway
@@ -7337,6 +7664,9 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
             goto fail;
         }
         lr_port_remove_router_ips(op);
+        if (op->peer && op->peer->nbsp) {
+            lr_port_unwire_peer_lsp(ovnsb_idl_txn, ni, nd, op);
+        }
         add_op_to_northd_tracked_ports(&trk_lrps->deleted, op);
         hmap_remove(&nd->lr_ports, &op->key_node);
         hmap_remove(&od->ports, &op->dp_node);
@@ -7366,11 +7696,97 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         hmapx_add(&nd->trk_data.trk_nat_lrs, od);
     }
 
+    /* A recompute gives every router a router group; one created
+     * incrementally needs it only once it has a distributed gateway port,
+     * whose HA chassis group the router group lists.  It is built from the
+     * peerings, so all of them have to be wired by now. */
+    if (lr_is_new && !vector_is_empty(&od->l3dgw_ports)) {
+        lr_group_create(&nd->lr_ports, od,
+                        hmap_count(&nd->lr_datapaths.datapaths));
+        lr_group_update_ha_chassis_groups(od->lr_group);
+    }
+
     return true;
 
 fail:
     destroy_tracked_ovn_ports(trk_lrps);
     return false;
+}
+
+/* Delete the logical router ports of a logical router that is going away,
+ * either removed from the northbound database or administratively disabled --
+ * a recompute treats both the same way, since a disabled router gets no
+ * datapath at all.  Mirrors the deletion half of lr_handle_lrp_changes().
+ *
+ * Returns false without having touched anything if any of the ports can't be
+ * handled. */
+static bool
+lr_delete_all_ports(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                    const struct northd_input *ni, struct northd_data *nd,
+                    struct ovn_datapath *od,
+                    struct tracked_ovn_ports *trk_lrps)
+{
+    struct ovn_port *op;
+
+    /* Vet every port before mutating any of them: a bail out halfway through
+     * would leave the router's ports and their SB rows inconsistent. */
+    HMAP_FOR_EACH (op, dp_node, &od->ports) {
+        /* cr-ports are synthetic and never appear in od->ports; they are
+         * deleted along with their primary port below. */
+        if (!op->nbrp || is_cr_port(op) ||
+            lrp_port_needs_recompute(od, op->nbrp, &nd->ls_ports,
+                                     ni->nbrec_static_mac_binding_table,
+                                     true)) {
+            return false;
+        }
+    }
+
+    bool lrp_deleted = false;
+    bool crp_deleted = false;
+    HMAP_FOR_EACH_SAFE (op, dp_node, &od->ports) {
+        lr_port_remove_router_ips(op);
+        if (op->peer && op->peer->nbsp) {
+            lr_port_unwire_peer_lsp(ovnsb_idl_txn, ni, nd, op);
+        }
+
+        /* The chassisredirect port of a distributed gateway port is not in
+         * od->ports; it goes away with its primary port.  Nothing is left to
+         * reach it through: the router's od->l3dgw_ports goes with the
+         * router. */
+        struct ovn_port *crp = op->cr_port;
+        if (crp) {
+            add_op_to_northd_tracked_ports(&trk_lrps->deleted, crp);
+            hmap_remove(&nd->lr_ports, &crp->key_node);
+            sbrec_port_binding_delete(crp->sb);
+            crp_deleted = true;
+        }
+
+        add_op_to_northd_tracked_ports(&trk_lrps->deleted, op);
+        hmap_remove(&nd->lr_ports, &op->key_node);
+        hmap_remove(&od->ports, &op->dp_node);
+        sbrec_port_binding_delete(op->sb);
+        lrp_deleted = true;
+    }
+
+    /* Purge SB MAC_Bindings learned on the just-deleted ports, as
+     * build_ports() does through cleanup_mac_bindings() on a recompute. */
+    if (lrp_deleted) {
+        cleanup_mac_bindings(ni->sbrec_mac_binding_table,
+                             &nd->lr_datapaths.datapaths, &nd->lr_ports);
+    }
+
+    /* The SB HA chassis groups the deleted cr-ports owned are no longer
+     * referenced by any port binding; drop them, as build_ports() does on a
+     * recompute. */
+    if (crp_deleted) {
+        northd_sync_ha_chassis_groups(ovnsb_idl_txn,
+                                      ni->sbrec_ha_chassis_group_table,
+                                      ni->sbrec_chassis_by_name,
+                                      ni->sbrec_ha_chassis_grp_by_name,
+                                      &nd->ls_ports, &nd->lr_ports);
+    }
+
+    return true;
 }
 
 /* Return true if changes are handled incrementally, false otherwise.
@@ -7397,11 +7813,6 @@ northd_handle_lr_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         const struct ovn_synced_logical_router *synced = node->data;
         const struct nbrec_logical_router *new_lr = synced->nb;
 
-        /* If the logical router is created with the below columns set,
-         * then we can't handle it in the incremental processor goto fail. */
-        if (new_lr->copp) {
-            goto fail;
-        }
         if (sparse_array_get(&nd->lr_datapaths.dps, synced->sdp->index)) {
             goto fail;
         }
@@ -7419,17 +7830,17 @@ northd_handle_lr_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
         hmapx_add(&nd->trk_data.trk_nat_lrs,od);
         hmapx_add(&nd->trk_data.trk_routers.crupdated, od);
 
-        /* A new router can come with static routes already attached.  Only
-         * the updated-router loop below tracks those, so track them here as
-         * well; otherwise routes_static_route_change_handler() never sees the
-         * routes of a newly created router and they are silently dropped. */
-        if (new_lr->n_static_routes) {
-            hmapx_add(&nd->trk_data.trk_lrs_routes, od);
+        /* A new router can come with static routes already attached; those
+         * are parsed from nd->trk_data.trk_routers.crupdated by
+         * routes_northd_change_handler(). */
+
+        if (lr_as_a_whole_needs_recompute(od, new_lr)) {
+            goto fail;
         }
 
         /* Create any logical router ports the new router already has. */
         if (!lr_handle_lrp_changes(ovnsb_idl_txn, new_lr, ni, nd, od,
-                                   &nd->trk_data.trk_lrps)) {
+                                   &nd->trk_data.trk_lrps, true)) {
             goto fail;
         }
     }
@@ -7456,7 +7867,7 @@ northd_handle_lr_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
             goto fail;
         }
         if (!lr_handle_lrp_changes(ovnsb_idl_txn, changed_lr, ni, nd, lrp_od,
-                                   &nd->trk_data.trk_lrps)) {
+                                   &nd->trk_data.trk_lrps, false)) {
             goto fail;
         }
 
@@ -7508,15 +7919,15 @@ northd_handle_lr_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
             goto fail;
         }
 
-        if (deleted_lr->copp ||
-            deleted_lr->n_ports > 0 ||
-            deleted_lr->n_policies > 0 ||
-            deleted_lr->n_static_routes > 0) {
+        if (lr_as_a_whole_needs_recompute(od, deleted_lr)) {
             goto fail;
         }
-        /* Since there are no ports the lr_group should be empty. If
-         * a logical router is deleted before the db gets
-         * recalculated nothing will create the lr_group. */
+
+        if (!lr_delete_all_ports(ovnsb_idl_txn, ni, nd, od,
+                                 &nd->trk_data.trk_lrps)) {
+            goto fail;
+        }
+
         if (od->lr_group) {
             free(od->lr_group->router_dps);
             sset_destroy(&od->lr_group->ha_chassis_groups);
