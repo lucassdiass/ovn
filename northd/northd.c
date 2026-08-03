@@ -6883,6 +6883,14 @@ check_lrp_changes_other_than_gateway(
             col == NBREC_LOGICAL_ROUTER_PORT_COL_HA_CHASSIS_GROUP) {
             continue;
         }
+        /* northd only mirrors "external_ids" into the SB port binding (see
+         * ovn_port_update_sbrec()); no logical flow is derived from it, so a
+         * change to it is resynced in place by lr_port_resync_external_ids().
+         * Neutron bumps its "neutron:revision_number" key on a port long
+         * after the port itself stopped changing. */
+        if (col == NBREC_LOGICAL_ROUTER_PORT_COL_EXTERNAL_IDS) {
+            continue;
+        }
         return true;
     }
     return false;
@@ -7208,6 +7216,27 @@ out:
     return ok;
 }
 
+/* Resync the SB port binding of the logical router port 'op' after a change
+ * to its NB "external_ids", the one column northd mirrors into it without
+ * deriving any logical flow from it.  A distributed gateway port shares the
+ * northbound row with its chassisredirect port, whose binding mirrors it
+ * too. */
+static void
+lr_port_resync_external_ids(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                            const struct northd_input *ni,
+                            struct ovn_port *op)
+{
+    ovn_port_update_sbrec(ovnsb_idl_txn, ni->sbrec_chassis_by_name,
+                          ni->sbrec_chassis_by_hostname, NULL,
+                          ni->sbrec_mirror_table, ni->sbrec_encap_by_ip, op,
+                          NULL, NULL);
+
+    if (op->cr_port) {
+        sbrec_port_binding_set_external_ids(op->cr_port->sb,
+                                            &op->nbrp->external_ids);
+    }
+}
+
 /* The gateway configuration of the distributed gateway port 'op' changed: one
  * of its gateway columns, or a Gateway_Chassis / HA_Chassis_Group row it
  * references.  Nothing about the port itself changes -- the chassisredirect
@@ -7326,26 +7355,42 @@ lr_handle_lrp_changes(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 }
             } else if (nbrec_logical_router_port_row_get_seqno(
                            new_nbrp, OVSDB_IDL_CHANGE_MODIFY) > 0) {
-                /* The only modifications handled in place concern the gateway
-                 * configuration: a regular port becoming a distributed gateway
-                 * port, and a change to the gateway of one that already is.
-                 * Re-initializing an LRP (re-wiring its peer, networks, ...)
-                 * is not supported, and neither is a distributed gateway port
-                 * going back to being a regular one. */
-                if (!lrp_gateway_change_only(new_nbrp) ||
-                    !(new_nbrp->n_gateway_chassis ||
-                      new_nbrp->ha_chassis_group)) {
+                /* The modifications handled in place are a change to the
+                 * "external_ids", which no logical flow depends on, and the
+                 * gateway configuration: a regular port becoming a distributed
+                 * gateway port, and a change to the gateway of one that
+                 * already is.  Re-initializing an LRP (re-wiring its peer,
+                 * networks, ...) is not supported, and neither is a
+                 * distributed gateway port going back to being a regular
+                 * one. */
+                bool resync_sb = nbrec_logical_router_port_is_updated(
+                    new_nbrp, NBREC_LOGICAL_ROUTER_PORT_COL_EXTERNAL_IDS);
+
+                if (lrp_gateway_change_only(new_nbrp)) {
+                    if (!(new_nbrp->n_gateway_chassis ||
+                          new_nbrp->ha_chassis_group)) {
+                        goto fail;
+                    }
+                    if (op->cr_port) {
+                        lr_port_resync_dgp(ovnsb_idl_txn, ni, nd, od);
+                    } else if (lrp_becomes_dgp_needs_recompute(
+                                   od, op, new_nbrp, nd,
+                                   ni->nbrec_static_mac_binding_table)) {
+                        goto fail;
+                    } else if (!lr_port_make_dgp(ovnsb_idl_txn, ni, nd, od, op,
+                                                 trk_lrps)) {
+                        goto fail;
+                    }
+                } else if (!resync_sb ||
+                           check_lrp_changes_other_than_gateway(new_nbrp)) {
+                    /* Neither a gateway change nor an "external_ids"-only one.
+                     * A row is also reported as modified when a row it
+                     * references changed, which lands here too. */
                     goto fail;
                 }
-                if (op->cr_port) {
-                    lr_port_resync_dgp(ovnsb_idl_txn, ni, nd, od);
-                } else if (lrp_becomes_dgp_needs_recompute(
-                               od, op, new_nbrp, nd,
-                               ni->nbrec_static_mac_binding_table)) {
-                    goto fail;
-                } else if (!lr_port_make_dgp(ovnsb_idl_txn, ni, nd, od, op,
-                                             trk_lrps)) {
-                    goto fail;
+
+                if (resync_sb) {
+                    lr_port_resync_external_ids(ovnsb_idl_txn, ni, op);
                 }
             }
             op->visited = true;

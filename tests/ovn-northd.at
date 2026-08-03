@@ -13244,6 +13244,93 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 
 OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LRP incremental processing of metadata changes])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-sbctl chassis-add hv1 geneve 10.0.0.1
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl --wait=sb lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+
+# northd only mirrors the "external_ids" of a logical router port into its SB
+# port binding, so a change to them is resynced without regenerating a single
+# logical flow.  Neutron bumps "neutron:revision_number" on a port long after
+# the port itself stopped changing.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb add Logical_Router_Port lr0-ls0 external_ids \
+    \"neutron:revision_number\"=3
+check_engine_compute northd incremental
+# The lflow node still runs the noop handler for its en_datapath_sync input,
+# but regenerates nothing.
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb unchanged
+
+AT_CHECK([ovn-sbctl --bare --columns=external_ids list port_binding lr0-ls0],
+[0], [dnl
+neutron:revision_number=3
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A later bump of the same key is no different.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router_Port lr0-ls0 \
+    external_ids:\"neutron:revision_number\"=4
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=external_ids list port_binding lr0-ls0],
+[0], [dnl
+neutron:revision_number=4
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A distributed gateway port shares the northbound row with its
+# chassisredirect port, whose binding mirrors the external_ids too.
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ls0 hv1 20
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router_Port lr0-ls0 \
+    external_ids:\"neutron:revision_number\"=5
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=external_ids list port_binding \
+    cr-lr0-ls0], [0], [dnl
+neutron:revision_number=5
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The gateway columns and the external_ids changing together are still a
+# gateway change.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router_Port lr0-ls0 \
+    external_ids:\"neutron:revision_number\"=6 \
+    -- lrp-set-gateway-chassis lr0-ls0 hv1 30
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=external_ids list port_binding \
+    cr-lr0-ls0], [0], [dnl
+neutron:revision_number=6
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Any other column still falls back to a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router_Port lr0-ls0 options:foo=bar
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
 AT_SETUP([Logical router incremental deletion with NAT rules])
 AT_KEYWORDS([incremental processing])
 ovn_start
