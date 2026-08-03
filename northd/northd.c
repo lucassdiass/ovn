@@ -22991,6 +22991,24 @@ lflow_handle_lr_stateful_changes(struct ovsdb_idl_txn *ovnsb_txn,
     struct hmapx_node *hmapx_node;
     bool handled = true;
 
+    /* A record goes away with its logical router.  The router's own ports are
+     * deleted with it (their stateful_lflow_ref is resynced by
+     * lflow_handle_northd_lrp_changes()) and any peer switch port is tracked
+     * as updated, but the flows the record owns itself have to be dropped
+     * here. */
+    HMAPX_FOR_EACH (hmapx_node, &trk_data->deleted) {
+        lr_stateful_rec = hmapx_node->data;
+        handled = lflow_ref_resync_flows(
+            lr_stateful_rec->lflow_ref, lflows, ovnsb_txn,
+            lflow_input->dps,
+            lflow_input->ovn_internal_version_changed,
+            lflow_input->sbrec_logical_flow_table,
+            lflow_input->sbrec_logical_dp_group_table);
+        if (!handled) {
+            goto exit;
+        }
+    }
+
     HMAPX_FOR_EACH (hmapx_node, &trk_data->crupdated) {
         lr_stateful_rec = hmapx_node->data;
         /* Unlink old lflows. */

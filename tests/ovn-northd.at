@@ -13192,6 +13192,37 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 
 OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([Logical router incremental deletion with NAT rules])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+# A logical router with no ports, policies, static routes or copp is deleted
+# incrementally whatever its NAT rules.  The flows the router's lr_stateful
+# record owns through its own lflow_ref -- here the datapath-wide ARP
+# responder for the SNAT address -- must go with it, or they keep a reference
+# to the southbound Datapath_Binding and the whole transaction fails.
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl --wait=sb lr-nat-add lr0 snat 172.16.1.5 192.168.0.0/24
+
+AT_CHECK([ovn-sbctl dump-flows lr0 | grep lr_in_ip_input | \
+    grep -c 'arp.tpa == 172.16.1.5'], [0], [1
+])
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lr-del lr0
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl find datapath_binding external_ids:name=lr0], [0], [])
+AT_CHECK([ovn-sbctl --bare --columns=_uuid find logical_flow \
+    match='"arp.op == 1 && arp.tpa == 172.16.1.5"'], [0], [])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
 AT_SETUP([LRP incremental processing of the distributed gateway transition])
 AT_KEYWORDS([incremental processing])
 ovn_start
