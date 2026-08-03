@@ -13140,6 +13140,55 @@ AT_CHECK([ovn-sbctl dump-flows lr0 | grep -c 'ip4.dst == 20.0.0.0/24'], [1],
 ])
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
+# A switch port of type "router" naming a router port that does not exist yet
+# is inert; creating the router port has to wire the peering from this side.
+check ovn-nbctl --wait=sb lsp-add sw0 sw0-lr0 \
+    -- lsp-set-type sw0-lr0 router \
+    -- lsp-set-options sw0-lr0 router-port=lr0-sw1 \
+    -- lsp-set-addresses sw0-lr0 router
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-add lr0 lr0-sw1 00:00:00:00:ff:02 20.0.0.1/24
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+# The switch port resolves its "router" address to the peer's networks, its
+# port binding points at the peer, and the switch gets the L2 lookup and
+# ARP responder flows of the router port.
+AT_CHECK([ovn-sbctl --bare --columns=mac list port_binding sw0-lr0], [0],
+[dnl
+router
+])
+AT_CHECK([ovn-sbctl --bare --columns=options list port_binding lr0-sw1], [0],
+[dnl
+peer=sw0-lr0
+])
+AT_CHECK([ovn-sbctl dump-flows sw0 | grep ls_in_l2_lkup | \
+    grep '00:00:00:00:ff:02' | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_lkup      ), priority=50   , match=(eth.dst == 00:00:00:00:ff:02), action=(outport = "sw0-lr0"; output;)
+])
+AT_CHECK([ovn-sbctl dump-flows sw0 | grep ls_in_arp_rsp | \
+    grep -c '20.0.0.1'], [0], [2
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Deleting the router port tears the peering down again, leaving the switch
+# port inert.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-del lr0-sw1
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows sw0 | grep -c '00:00:00:00:ff:02'], [1], [0
+])
+AT_CHECK([ovn-sbctl --bare --columns=options list port_binding sw0-lr0], [0],
+[dnl
+peer=lr0-sw1
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
 OVN_CLEANUP_NORTHD
 AT_CLEANUP
 
@@ -13170,10 +13219,13 @@ check ovn-nbctl --wait=sb lrp-add lr1 lr1-sw0 00:00:00:00:ff:11 10.1.0.1/24
 check_engine_compute northd recompute
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
-# Adding a router port whose peer "router" LSP already exists falls back to
-# recompute (wiring the peer from the LRP side is not supported).
+# Adding a router port whose peer "router" LSP already exists is wired from
+# the router side, but only when the switch that owns the peer allows it: the
+# ACLs of this one make its ls_stateful flows depend on the set of router
+# ports, which that path does not regenerate.
 check ovn-nbctl --wait=sb lr-add lr2
 check ovn-nbctl ls-add sw2
+check ovn-nbctl acl-add sw2 to-lport 1000 'ip4' allow-related
 check ovn-nbctl lsp-add sw2 sw2-lr2
 check ovn-nbctl lsp-set-type sw2-lr2 router
 check ovn-nbctl --wait=sb lsp-set-options sw2-lr2 router-port=lr2-sw2
@@ -13216,6 +13268,109 @@ AT_CHECK([ovn-sbctl find datapath_binding external_ids:name=lr0], [0], [])
 AT_CHECK([ovn-sbctl --bare --columns=_uuid find logical_flow \
     match='"arp.op == 1 && arp.tpa == 172.16.1.5"'], [0], [])
 
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([Logical router incremental processing of the enabled toggle])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+# A disabled logical router gets no datapath at all, so northd sees the
+# toggle as a deletion followed by a creation.
+check ovn-nbctl meter-add m-arp drop 100 pktps 10
+check ovn-nbctl copp-add copp-r0 arp m-arp
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl lr-copp-add copp-r0 lr0
+check ovn-nbctl lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls0 ls0-lr0 lr0-ls0
+check ovn-nbctl lr-route-add lr0 10.0.0.0/24 192.168.0.9
+check ovn-nbctl --wait=sb lr-nat-add lr0 snat 172.16.1.5 192.168.0.0/24
+
+AT_CHECK([ovn-sbctl --bare --columns=mac list port_binding ls0-lr0], [0], [dnl
+router
+])
+
+# Remember what the router generates while it is up.
+n_nat_flows=$(ovn-sbctl dump-flows lr0 | grep -c '172.16.1.5')
+check test "$n_nat_flows" -gt 0
+n_copp_flows=$(ovn-sbctl --bare --columns=controller_meter list logical_flow \
+    | grep -c .)
+check test "$n_copp_flows" -gt 0
+
+# Disabling it drops the datapath, its ports and its flows, and leaves the
+# peer switch port inert.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router lr0 enabled=false
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl find datapath_binding external_ids:name=lr0], [0], [])
+AT_CHECK([ovn-sbctl find port_binding logical_port=lr0-ls0], [0], [])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep -c '00:00:00:00:ff:01'], [1], [0
+])
+AT_CHECK([ovn-sbctl --bare --columns=options list port_binding ls0-lr0], [0],
+[dnl
+peer=lr0-ls0
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Enabling it back brings all of it -- copp, port, static route and NAT --
+# without a recompute either.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router lr0 enabled=true
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=type list port_binding lr0-ls0], [0],
+[dnl
+patch
+])
+AT_CHECK([ovn-sbctl --bare --columns=mac list port_binding ls0-lr0], [0], [dnl
+router
+])
+# The static route, the SNAT and the copp meter are all back.
+AT_CHECK([ovn-sbctl dump-flows lr0 | grep -c 'ip4.dst == 10.0.0.0/24'], [0],
+[1
+])
+check test "$(ovn-sbctl dump-flows lr0 | grep -c '172.16.1.5')" = \
+    "$n_nat_flows"
+check test "$(ovn-sbctl --bare --columns=controller_meter list logical_flow \
+    | grep -c .)" = "$n_copp_flows"
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A router with route policies is not handled: only a recompute of
+# en_route_policies picks them up.
+check ovn-nbctl --wait=sb lr-policy-add lr0 100 "ip4.src == 192.168.0.0/24" \
+    allow
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router lr0 enabled=false
+check_engine_compute northd recompute
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router lr0 enabled=true
+check_engine_compute northd recompute
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check ovn-nbctl --wait=sb lr-policy-del lr0
+
+# Neither is a router with a distributed gateway port.
+check ovn-sbctl chassis-add hv1 geneve 10.0.0.1
+check ovn-nbctl lrp-add lr0 lr0-ext 00:00:00:00:ee:01 172.16.1.1/24
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ext hv1 20
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Router lr0 enabled=false
+check_engine_compute northd recompute
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
 OVN_CLEANUP_NORTHD

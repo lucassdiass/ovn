@@ -330,6 +330,20 @@ en_route_policies_run(struct engine_node *node, void *data)
     return EN_UPDATED;
 }
 
+static struct parsed_route *
+static_route_lookup_parsed(struct routes_data *routes_data,
+                           const struct nbrec_logical_router_static_route *sr)
+{
+    struct hmap *routes = &routes_data->parsed_routes;
+    struct parsed_route *pr = parsed_route_lookup_by_source(
+        ROUTE_SOURCE_STATIC, &sr->header_, routes);
+    if (!pr) {
+        pr = parsed_route_lookup_by_source(
+            ROUTE_SOURCE_IC_DYNAMIC, &sr->header_, routes);
+    }
+    return pr;
+}
+
 enum engine_input_handler_result
 routes_northd_change_handler(struct engine_node *node,
                              void *data OVS_UNUSED)
@@ -340,16 +354,19 @@ routes_northd_change_handler(struct engine_node *node,
         return EN_UNHANDLED;
     }
 
-    /* This node uses northd_data->lr_datapaths and northd_data->lr_ports.
-     * Creating or deleting a regular logical router port changes the set of
-     * directly-connected routes; handle that incrementally.  Any other change
-     * to this data is either irrelevant to routes (e.g. a portless router
-     * create/delete has no connected routes) or already forced a full
+    /* This node uses northd_data->lr_datapaths and northd_data->lr_ports.  A
+     * logical router that comes or goes brings its static routes with it, and
+     * creating or deleting a regular logical router port changes the set of
+     * directly-connected routes; handle both incrementally.  Any other change
+     * to this data is either irrelevant to routes or already forced a full
      * recompute by the northd node. */
+    struct tracked_dps *trk_lrs = &northd_data->trk_data.trk_routers;
     struct tracked_ovn_ports *trk_lrps = &northd_data->trk_data.trk_lrps;
     if (hmapx_is_empty(&trk_lrps->created) &&
         hmapx_is_empty(&trk_lrps->updated) &&
-        hmapx_is_empty(&trk_lrps->deleted)) {
+        hmapx_is_empty(&trk_lrps->deleted) &&
+        hmapx_is_empty(&trk_lrs->crupdated) &&
+        hmapx_is_empty(&trk_lrs->deleted)) {
         return EN_HANDLED_UNCHANGED;
     }
 
@@ -360,15 +377,54 @@ routes_northd_change_handler(struct engine_node *node,
 
     routes_data->tracked = true;
 
+    struct bfd_data *bfd_data = engine_get_input_data("bfd", node);
     struct hmapx_node *hmapx_node;
+    struct parsed_route *pr;
     struct ovn_port *op;
+
+    /* Deleted routers: drop every route of theirs, whatever its source.  The
+     * datapath is going away, so nothing can be built from it anymore. */
+    HMAPX_FOR_EACH (hmapx_node, &trk_lrs->deleted) {
+        const struct ovn_datapath *od = hmapx_node->data;
+
+        HMAP_FOR_EACH_SAFE (pr, key_node, &routes_data->parsed_routes) {
+            if (pr->od == od) {
+                hmap_remove(&routes_data->parsed_routes, &pr->key_node);
+                hmapx_add(&routes_data->trk_data.trk_deleted_parsed_route, pr);
+            }
+        }
+    }
+
+    /* Created routers: parse the static routes they come with.  A router that
+     * is only crupdated already has all of its routes parsed, so the lookup
+     * makes this a no-op for those. */
+    HMAPX_FOR_EACH (hmapx_node, &trk_lrs->crupdated) {
+        const struct ovn_datapath *od = hmapx_node->data;
+
+        for (size_t i = 0; i < od->nbr->n_static_routes; i++) {
+            const struct nbrec_logical_router_static_route *sr =
+                od->nbr->static_routes[i];
+
+            if (static_route_lookup_parsed(routes_data, sr)) {
+                continue;
+            }
+            pr = parsed_routes_add_static(od, &northd_data->lr_ports, sr,
+                                          &bfd_data->bfd_connections,
+                                          &routes_data->parsed_routes,
+                                          &routes_data->route_tables,
+                                          &routes_data->bfd_active_connections);
+            if (!pr) {
+                return EN_UNHANDLED;
+            }
+            hmapx_add(&routes_data->trk_data.trk_crupdated_parsed_route, pr);
+        }
+    }
 
     /* Deleted LRPs: drop their connected routes.  An LRP with N networks has
      * N connected routes that share the LRP's uuid as source hint, so loop
      * until none remains. */
     HMAPX_FOR_EACH (hmapx_node, &trk_lrps->deleted) {
         op = hmapx_node->data;
-        struct parsed_route *pr;
         while ((pr = parsed_route_lookup_by_source(
                         ROUTE_SOURCE_CONNECTED, &op->nbrp->header_,
                         &routes_data->parsed_routes))) {
@@ -421,19 +477,6 @@ static_route_is_relevant_updated(
                 NBREC_LOGICAL_ROUTER_STATIC_ROUTE_COL_SELECTION_FIELDS);
 }
 
-static struct parsed_route *
-static_route_lookup_parsed(struct routes_data *routes_data,
-                           const struct nbrec_logical_router_static_route *sr)
-{
-    struct hmap *routes = &routes_data->parsed_routes;
-    struct parsed_route *pr = parsed_route_lookup_by_source(
-        ROUTE_SOURCE_STATIC, &sr->header_, routes);
-    if (!pr) {
-        pr = parsed_route_lookup_by_source(
-            ROUTE_SOURCE_IC_DYNAMIC, &sr->header_, routes);
-    }
-    return pr;
-}
 
 enum engine_input_handler_result
 routes_static_route_change_handler(struct engine_node *node,
