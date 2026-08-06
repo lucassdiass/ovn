@@ -12933,6 +12933,16 @@ check_engine_compute northd recompute
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
+# Turning it back into a plain VIF drops the router's S_ROUTER_IN_GW_REDIRECT
+# drop flow, so this type change must fall back to recompute too.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-type vip0 "" \
+    -- remove Logical_Switch_Port vip0 options virtual-ip \
+    -- remove Logical_Switch_Port vip0 options virtual-parents
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
 OVN_CLEANUP_NORTHD
 AT_CLEANUP
 
@@ -12966,6 +12976,178 @@ check_engine_compute northd recompute
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lsp-del vip0
 check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# So must turning an existing plain VIF into a virtual port, and back.
+check ovn-nbctl --wait=sb lsp-add sw0 vip0 \
+    -- lsp-set-addresses vip0 "00:00:00:00:00:02 10.0.0.5"
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-type vip0 virtual \
+    -- set Logical_Switch_Port vip0 \
+        options:virtual-ip=10.0.0.5 options:virtual-parents=vif0
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-type vip0 "" \
+    -- remove Logical_Switch_Port vip0 options virtual-ip \
+    -- remove Logical_Switch_Port vip0 options virtual-parents
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+
+AT_SETUP([Virtual port incremental processing - port lifecycle])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+# Walk through the transactions a CMS (e.g. the Neutron ML2/OVN driver
+# handling an Octavia VIP) issues over the lifetime of a virtual port: the
+# VIP starts out as a plain VIF, turns into type=virtual when the first
+# backend advertises its address, gains and loses parents, and finally goes
+# back to a plain VIF once the last parent is gone.
+
+check ovn-nbctl ls-add ls0
+
+# The VIP is created as a plain VIF: no port advertises its address yet.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add ls0 vip \
+    -- lsp-set-port-security vip "fa:16:3e:00:00:01 10.0.0.100"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+# A plain VIF has an empty Port_Binding type.
+AT_CHECK([ovn-sbctl --bare --columns=type find Port_Binding logical_port=vip],
+         [0], [
+])
+vif_pb=$(ovn-sbctl --bare --columns=_uuid find Port_Binding logical_port=vip)
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# First backend: the VIP becomes type=virtual and its parent is created in
+# the same transaction.  A type change to/from "virtual" recreates the SB
+# Port_Binding row, which is incrementally processed as a deletion followed
+# by a creation.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb \
+    -- lsp-set-type vip virtual \
+    -- set Logical_Switch_Port vip options:virtual-ip="10.0.0.100" \
+           options:virtual-parents="amp1" \
+    -- lsp-add ls0 amp1 \
+    -- lsp-set-addresses amp1 "fa:16:3e:00:00:02 10.0.0.10" \
+    -- lsp-set-port-security amp1 "fa:16:3e:00:00:02 10.0.0.10 10.0.0.100"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=type find Port_Binding logical_port=vip],
+         [0], [dnl
+virtual
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | grep bind_vport \
+    | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(inport == "amp1" && ((arp.op == 1 && arp.spa == 10.0.0.100 && arp.tpa == 10.0.0.100) || (arp.op == 2 && arp.spa == 10.0.0.100))), action=(bind_vport("vip", inport); next;)
+])
+
+# The Port_Binding row was recreated, so that a claim of the port as a VIF
+# can't survive into its life as a virtual port.
+virtual_pb=$(ovn-sbctl --bare --columns=_uuid find Port_Binding \
+    logical_port=vip)
+check test "$virtual_pb" != "$vif_pb"
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Second backend: a new parent is appended to "virtual-parents" and the
+# parent port is created in the same transaction.  Both are incrementally
+# processed.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb \
+    -- set Logical_Switch_Port vip options:virtual-parents="amp1,amp2" \
+    -- lsp-add ls0 amp2 \
+    -- lsp-set-addresses amp2 "fa:16:3e:00:00:03 10.0.0.11" \
+    -- lsp-set-port-security amp2 "fa:16:3e:00:00:03 10.0.0.11 10.0.0.100"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | grep bind_vport \
+    | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(inport == "amp1" && ((arp.op == 1 && arp.spa == 10.0.0.100 && arp.tpa == 10.0.0.100) || (arp.op == 2 && arp.spa == 10.0.0.100))), action=(bind_vport("vip", inport); next;)
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(inport == "amp2" && ((arp.op == 1 && arp.spa == 10.0.0.100 && arp.tpa == 10.0.0.100) || (arp.op == 2 && arp.spa == 10.0.0.100))), action=(bind_vport("vip", inport); next;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The first backend stops advertising the VIP address: it is dropped from
+# "virtual-parents" while the port itself stays around.  The VIP remains
+# virtual, so this is incrementally processed.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb \
+    -- set Logical_Switch_Port vip options:virtual-parents="amp2" \
+    -- lsp-set-port-security amp1 "fa:16:3e:00:00:02 10.0.0.10"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | grep bind_vport \
+    | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(inport == "amp2" && ((arp.op == 1 && arp.spa == 10.0.0.100 && arp.tpa == 10.0.0.100) || (arp.op == 2 && arp.spa == 10.0.0.100))), action=(bind_vport("vip", inport); next;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The remaining parent is deleted instead of just dropping the address.  The
+# CMS deletes the port and updates "virtual-parents" in the same
+# transaction; the VIP stays virtual, so this is incrementally processed.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb \
+    -- lsp-del amp2 \
+    -- set Logical_Switch_Port vip options:virtual-parents="amp1" \
+    -- lsp-set-port-security amp1 "fa:16:3e:00:00:02 10.0.0.10 10.0.0.100"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | grep bind_vport \
+    | ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_arp_rsp      ), priority=100  , match=(inport == "amp1" && ((arp.op == 1 && arp.spa == 10.0.0.100 && arp.tpa == 10.0.0.100) || (arp.op == 2 && arp.spa == 10.0.0.100))), action=(bind_vport("vip", inport); next;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Pretend ovn-controller claimed the virtual port: these columns and options
+# are written by pinctrl on the SB row, never by northd.
+check ovn-sbctl set Port_Binding vip virtual_parent=amp1 \
+    options:vport-last-claim=1 options:vport-backoff=1000
+check ovn-nbctl --wait=sb sync
+
+# The last parent is gone: the CMS clears the virtual options and resets the
+# type in a single transaction.  Changing the type away from "virtual" is
+# incrementally processed the same way.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb \
+    -- remove Logical_Switch_Port vip options virtual-parents \
+    -- remove Logical_Switch_Port vip options virtual-ip \
+    -- lsp-set-type vip "" \
+    -- lsp-set-port-security amp1 "fa:16:3e:00:00:02 10.0.0.10"
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=type find Port_Binding logical_port=vip],
+         [0], [
+])
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_arp_rsp | grep bind_vport \
+    | ovn_strip_lflows], [0], [])
+
+# The Port_Binding row was recreated once more, dropping the stale claim.
+check test "$(ovn-sbctl --bare --columns=_uuid find Port_Binding \
+    logical_port=vip)" != "$virtual_pb"
+AT_CHECK([ovn-sbctl --bare --columns=virtual_parent,options find \
+    Port_Binding logical_port=vip], [0], [dnl
+
+
+])
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
