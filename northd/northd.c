@@ -21700,10 +21700,11 @@ ovn_datapaths_destroy(struct ovn_datapaths *datapaths)
     sparse_array_destroy(&datapaths->dps);
 }
 
+/* Frees the 'lrouter_group' state built by build_lrouter_groups().  A group is
+ * shared by all the routers in it, so it has to be torn down as a whole before
+ * any of its member datapaths is freed. */
 static void
-destroy_datapaths_and_ports(struct ovn_datapaths *ls_datapaths,
-                            struct ovn_datapaths *lr_datapaths,
-                            struct hmap *ls_ports, struct hmap *lr_ports)
+destroy_lrouter_groups(struct ovn_datapaths *lr_datapaths)
 {
     struct ovn_datapath *router_dp;
     HMAP_FOR_EACH (router_dp, key_node, &lr_datapaths->datapaths) {
@@ -21720,29 +21721,88 @@ destroy_datapaths_and_ports(struct ovn_datapaths *ls_datapaths,
             free(lr_group);
         }
     }
+}
 
+/* Destroys every port in 'ports' and 'ports' itself.  The ports of a datapath
+ * must be destroyed before the datapath: ovn_port_cleanup() releases the
+ * port's tunnel key back into op->od->port_tnlids, ovn_port_destroy() unlinks
+ * the port from op->od->ports, and ovn_datapath_destroy() asserts that
+ * od->ports is empty. */
+static void
+destroy_ports(struct hmap *ports)
+{
     struct ovn_port *port;
-    HMAP_FOR_EACH_SAFE (port, key_node, ls_ports) {
-        ovn_port_destroy(ls_ports, port);
+    HMAP_FOR_EACH_SAFE (port, key_node, ports) {
+        ovn_port_destroy(ports, port);
     }
-    hmap_destroy(ls_ports);
+    hmap_destroy(ports);
+}
 
-    HMAP_FOR_EACH_SAFE (port, key_node, lr_ports) {
-        ovn_port_destroy(lr_ports, port);
+/* Drops the references that logical router datapaths hold on logical switch
+ * datapaths (od->ls_peers, populated by join_logical_ports() for every
+ * router-type LSP).  This is the only such cross-side reference between
+ * datapaths, and clearing it is what lets the switch half be torn down while
+ * the router half is still alive. */
+static void
+detach_ls_peers(struct ovn_datapaths *lr_datapaths)
+{
+    struct ovn_datapath *od;
+    HMAP_FOR_EACH (od, key_node, &lr_datapaths->datapaths) {
+        vector_clear(&od->ls_peers);
     }
-    hmap_destroy(lr_ports);
+}
 
-    ovn_datapaths_destroy(ls_datapaths);
-    ovn_datapaths_destroy(lr_datapaths);
+void
+northd_init_ls(struct northd_data *data)
+{
+    ovn_datapaths_init(&data->ls_datapaths);
+    hmap_init(&data->ls_ports);
+}
+
+/* Tears down the logical switch half of 'data': the LSPs and then the switch
+ * datapaths that own them.
+ *
+ * A caller that keeps the router half alive is responsible for everything on
+ * that side that points here.  Port peers are handled for us
+ * (ovn_port_cleanup() clears op->peer->peer) and od->ls_peers is handled by
+ * detach_ls_peers(), but data->lb_datapaths_map, data->svc_monitor_lsps,
+ * data->local_svc_monitors_map and data->monitored_ports_map all index switch
+ * datapaths and LSPs, so they have to be rebuilt afterwards. */
+void
+northd_destroy_ls(struct northd_data *data)
+{
+    detach_ls_peers(&data->lr_datapaths);
+    destroy_ports(&data->ls_ports);
+    ovn_datapaths_destroy(&data->ls_datapaths);
+}
+
+void
+northd_init_lr(struct northd_data *data)
+{
+    ovn_datapaths_init(&data->lr_datapaths);
+    hmap_init(&data->lr_ports);
+}
+
+/* Tears down the logical router half of 'data': the router groups, then the
+ * LRPs (including the derived chassisredirect ports) and then the router
+ * datapaths.
+ *
+ * The switch half holds no pointer into the router half other than op->peer,
+ * which ovn_port_cleanup() clears, but data->lb_datapaths_map indexes router
+ * datapaths and has to be rebuilt if it is meant to outlive this call. */
+void
+northd_destroy_lr(struct northd_data *data)
+{
+    destroy_lrouter_groups(&data->lr_datapaths);
+    destroy_ports(&data->lr_ports);
+    ovn_datapaths_destroy(&data->lr_datapaths);
 }
 
 void
 northd_init(struct northd_data *data)
 {
-    ovn_datapaths_init(&data->ls_datapaths);
-    ovn_datapaths_init(&data->lr_datapaths);
-    hmap_init(&data->ls_ports);
-    hmap_init(&data->lr_ports);
+    northd_init_ls(data);
+    northd_init_lr(data);
     hmap_init(&data->lb_datapaths_map);
     hmap_init(&data->lb_group_datapaths_map);
     sset_init(&data->svc_monitor_lsps);
@@ -21832,8 +21892,8 @@ northd_destroy(struct northd_data *data)
      */
     cleanup_macam();
 
-    destroy_datapaths_and_ports(&data->ls_datapaths, &data->lr_datapaths,
-                                &data->ls_ports, &data->lr_ports);
+    northd_destroy_ls(data);
+    northd_destroy_lr(data);
 
     sset_destroy(&data->svc_monitor_lsps);
     hmapx_destroy(&data->monitored_ports_map);

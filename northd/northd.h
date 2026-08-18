@@ -949,6 +949,16 @@ bool northd_handle_ipam_changes(struct northd_data *nd);
 void destroy_northd_data_tracked_changes(struct northd_data *);
 void northd_destroy(struct northd_data *data);
 void northd_init(struct northd_data *data);
+
+/* Per-half setup and teardown of the topology state in 'struct northd_data'.
+ * northd_init()/northd_destroy() are built from these; they are exposed so a
+ * scope-aware recompute can rebuild one half only.  See the comments on
+ * northd_destroy_ls() and northd_destroy_lr() in northd.c for the cross-side
+ * references a caller has to deal with before doing so. */
+void northd_init_ls(struct northd_data *data);
+void northd_destroy_ls(struct northd_data *data);
+void northd_init_lr(struct northd_data *data);
+void northd_destroy_lr(struct northd_data *data);
 void northd_indices_create(struct northd_data *data,
                            struct ovsdb_idl *ovnsb_idl);
 
