@@ -812,13 +812,26 @@ lflow_table_add_lflow__(struct lflow_table *lflow_table,
 
         if (!lrn->linked) {
             if (lrn->dpgrp_lflow) {
-                ovs_assert(lrn->dpgrp_bitmap_len == dp_bitmap_len);
                 size_t index;
                 BITMAP_FOR_EACH_1 (index, dp_bitmap_len, dp_bitmap) {
                     /* Allocate a reference counter only if already used. */
                     if (dynamic_bitmap_is_set(&lflow->dpg_bitmap, index)) {
                         dp_refcnt_use(&lflow->dp_refcnts_map, index);
                     }
+                }
+
+                /* The set of datapaths this lflow_ref applies the lflow to
+                 * may have changed since the lflow_ref_node was created, and
+                 * so may the number of datapaths.  The references above were
+                 * taken for 'dp_bitmap', so 'dp_bitmap' is what
+                 * lflow_ref_unlink_lflows() has to walk to release them. */
+                if (lrn->dpgrp_bitmap_len != dp_bitmap_len) {
+                    bitmap_free(lrn->dpgrp_bitmap);
+                    lrn->dpgrp_bitmap = bitmap_clone(dp_bitmap, dp_bitmap_len);
+                    lrn->dpgrp_bitmap_len = dp_bitmap_len;
+                } else {
+                    memcpy(lrn->dpgrp_bitmap, dp_bitmap,
+                           bitmap_n_bytes(dp_bitmap_len));
                 }
             } else {
                 /* Allocate a reference counter only if already used. */

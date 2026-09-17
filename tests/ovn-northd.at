@@ -24176,3 +24176,78 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([Logical flow loses a datapath when an lflow_ref grows])
+ovn_start
+
+check ovn-nbctl ls-add ls1
+check ovn-nbctl ls-add ls2
+check ovn-nbctl ls-add ls3
+
+# lb1 and lb2 have the same vip.  The ls_in_pre_stateful flow of a vip only
+# depends on the vip itself, not on the backends, so both load balancers
+# generate the very same logical flow and it ends up referenced by the
+# lflow_ref of both of them.
+check ovn-nbctl lb-add lb1 10.0.0.10:80 10.0.0.1:80
+check ovn-nbctl lb-add lb2 10.0.0.10:80 10.0.0.2:80
+check ovn-nbctl ls-lb-add ls1 lb1
+check ovn-nbctl --wait=sb ls-lb-add ls2 lb2
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+
+# Associate lb1 with ls3 as well.  lb1's lflow_ref is unlinked and its lflows
+# are generated again, now with the {ls1, ls3} datapath bitmap.  The
+# lflow_ref_node of the shared flow is reused though, and it keeps the {ls1}
+# bitmap it cloned when it was created.
+check ovn-nbctl --wait=sb ls-lb-add ls3 lb1
+check_engine_stats lflow norecompute compute
+AT_CHECK([ovn-sbctl dump-flows ls3 | grep -c "ip4.dst == 10.0.0.10"], [0], [2
+])
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+
+# Move lb1 to a different vip.  lb1 doesn't generate the flow shared with lb2
+# anymore, so that flow must be left with ls2 only.  Unlinking lb1's
+# lflow_ref walks the stale {ls1} bitmap, hence the reference taken for ls3
+# is never released and the flow stays applied to ls3.
+check ovn-nbctl --wait=sb set load_balancer lb1 vips='"10.0.0.20:80"="10.0.0.1:80"'
+check_engine_stats lflow norecompute compute
+
+AT_CHECK([ovn-sbctl dump-flows ls3 | grep "ip4.dst == 10.0.0.10"], [1], [])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([Logical flow dp group bitmap grows while an lflow_ref is alive])
+ovn_start
+
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lb-add lb1 10.0.0.10:80 10.0.0.1:80
+check ovn-nbctl --wait=sb lr-lb-add lr1 lb1
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+
+# A logical router created without ports is processed incrementally, so the
+# lflow table is not rebuilt, but ods_size(lr_datapaths) grows.  The
+# lflow_ref_nodes of lb1 still hold a datapath bitmap of the previous size.
+check ovn-nbctl --wait=sb lr-add lr2
+check_engine_stats lflow norecompute compute
+
+# Generate lb1's lflows again.  They are now added with a bitmap longer than
+# the one stored in the lflow_ref_node.
+check ovn-nbctl --wait=sb lr-lb-add lr2 lb1
+check_engine_stats lflow norecompute compute
+
+AT_CHECK([ovn-sbctl dump-flows lr2 | grep "lr_in_defrag" | ovn_strip_lflows], [0], [dnl
+  table=??(lr_in_defrag       ), priority=0    , match=(1), action=(next;)
+  table=??(lr_in_defrag       ), priority=100  , match=(ip && ip4.dst == 10.0.0.10), action=(ct_dnat;)
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
