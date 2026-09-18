@@ -12597,6 +12597,217 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP incremental processing of container ports])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lsp-add ls0 parent \
+    -- lsp-set-addresses parent "aa:aa:aa:00:00:01 192.168.0.11"
+check ovn-nbctl --wait=sb lsp-add ls0 sub \
+    -- lsp-set-addresses sub "aa:aa:aa:00:00:02 192.168.0.12"
+
+AT_CHECK([ovn-sbctl --bare --columns=parent_port,tag list Port_Binding sub],
+[0], [dnl
+
+
+])
+
+# Turning a plain VIF into a container port is what a CMS does when a port
+# becomes the subport of a trunk.  The SB port binding has to be recreated,
+# so the port is reprocessed as a deletion followed by a creation.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port sub \
+    parent_name=parent tag_request=101
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+check_engine_compute sync_to_sb_pb incremental
+
+# 'tag' is derived from 'tag_request' and copied into the port binding.
+AT_CHECK([ovn-nbctl --bare --columns=tag list Logical_Switch_Port sub], [0],
+[dnl
+101
+])
+AT_CHECK([ovn-sbctl --bare --columns=parent_port,tag list Port_Binding sub],
+[0], [dnl
+parent
+101
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The flows of a container port are those of any other VIF.
+AT_CHECK([ovn-sbctl dump-flows ls0 | grep ls_in_l2_lkup | grep '"sub"' | \
+    ovn_strip_lflows], [0], [dnl
+  table=??(ls_in_l2_lkup      ), priority=50   , match=(eth.dst == aa:aa:aa:00:00:02), action=(outport = "sub"; output;)
+])
+
+# Removing the port from the trunk again turns it back into a plain VIF.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb clear Logical_Switch_Port sub parent_name \
+    -- clear Logical_Switch_Port sub tag_request
+check_engine_compute northd incremental
+
+# Without a request there is no tag to derive, in the NB or in the SB.
+AT_CHECK([ovn-nbctl --bare --columns=tag list Logical_Switch_Port sub], [0],
+[dnl
+
+])
+AT_CHECK([ovn-sbctl --bare --columns=parent_port,tag list Port_Binding sub],
+[0], [dnl
+
+
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A port created as a container port in a single transaction.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add ls0 sub2 parent 102 \
+    -- lsp-set-addresses sub2 "aa:aa:aa:00:00:03 192.168.0.13"
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=parent_port,tag list Port_Binding sub2],
+[0], [dnl
+parent
+102
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Changing the tag of a container port keeps the port binding, which only has
+# to follow the new value.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port sub2 tag_request=103
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl --bare --columns=parent_port,tag list Port_Binding sub2],
+[0], [dnl
+parent
+103
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Deleting a container port.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del sub2
+check_engine_compute northd incremental
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# 'tag' is northd's to write, derived from 'tag_request'.  A CMS that sets it
+# directly gets it dropped again, incrementally as well as on a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port sub \
+    parent_name=parent tag=104
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-nbctl --bare --columns=tag list Logical_Switch_Port sub], [0],
+[dnl
+
+])
+AT_CHECK([ovn-sbctl --bare --columns=parent_port,tag list Port_Binding sub],
+[0], [dnl
+parent
+
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check ovn-nbctl --wait=sb clear Logical_Switch_Port sub parent_name
+
+# Asking northd to allocate the tag falls back to recompute: the pool of tags
+# in use by a parent is only built by a recompute.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add ls0 sub3 parent 0 \
+    -- lsp-set-addresses sub3 "aa:aa:aa:00:00:04 192.168.0.14"
+check_engine_compute northd recompute
+
+AT_CHECK([ovn-nbctl --bare --columns=tag list Logical_Switch_Port sub3], [0],
+[dnl
+1
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP incremental processing of container ports of a network function])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-nbctl ls-add sw0
+check ovn-nbctl ls-add sw1
+
+# The network function's own ports live on another logical switch, so on sw0
+# only a container port parented to one of them can stand in for it -- see
+# ovn_port_find_port_or_child(), which build_network_function() resolves the
+# inport and the outport with.
+check ovn-nbctl lsp-add sw1 nf-p1
+check ovn-nbctl lsp-add sw1 nf-p2
+check ovn-nbctl set logical_switch_port nf-p1 \
+    options:receive_multicast=false options:lsp_learn_fdb=false \
+    options:is-nf=true options:nf-linked-port=nf-p2
+check ovn-nbctl set logical_switch_port nf-p2 \
+    options:receive_multicast=false options:lsp_learn_fdb=false \
+    options:is-nf=true options:nf-linked-port=nf-p1
+check ovn-nbctl nf-add nf0 101 nf-p1 nf-p2
+check ovn-nbctl nfg-add nfg0 201 inline nf0
+
+check ovn-nbctl lsp-add sw0 sw0-p1 \
+    -- lsp-set-addresses sw0-p1 "00:00:00:00:00:01 10.0.0.2"
+check ovn-nbctl pg-add pg0 sw0-p1
+check ovn-nbctl acl-add pg0 from-lport 1002 \
+    "inport == @pg0 && ip4.dst == 10.0.0.3" allow-related nfg0
+
+check ovn-sbctl chassis-add gw1 geneve 127.0.0.1
+chassis_uuid=$(fetch_column Chassis _uuid name=gw1)
+check ovn-sbctl set port_binding nf-p1 up=true chassis=$chassis_uuid
+check ovn-sbctl set port_binding nf-p2 up=true chassis=$chassis_uuid
+check ovn-nbctl --wait=sb sync
+
+# Neither of the network function's ports is on sw0 yet, so it has nothing to
+# steer through.
+AT_CHECK([ovn-sbctl dump-flows sw0 | grep ls_in_network_function | \
+    grep 'inport ==' | ovn_strip_lflows | sort], [0], [])
+
+# The container ports take their place.  These flows are owned by the
+# switch's ls_stateful lflow_ref, not by the new ports' own, so creating them
+# has to regenerate it.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add sw0 subA nf-p1 101 \
+    -- lsp-set-addresses subA "00:00:00:00:00:09 10.0.0.9" \
+    -- lsp-add sw0 subB nf-p2 102 \
+    -- lsp-set-addresses subB "00:00:00:00:00:0a 10.0.0.10"
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl dump-flows sw0 | grep ls_in_network_function | \
+    grep 'inport ==' | ovn_strip_lflows | sort], [0], [dnl
+  table=??(ls_in_network_function), priority=100  , match=(inport == "subA"), action=(reg5[[16..31]] = ct_label.tun_if_id; next;)
+  table=??(ls_in_network_function), priority=100  , match=(inport == "subB"), action=(reg5[[16..31]] = ct_label.tun_if_id; next;)
+])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# And give it back when they go away.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del subA -- lsp-del subB
+check_engine_compute northd incremental
+
+AT_CHECK([ovn-sbctl dump-flows sw0 | grep ls_in_network_function | \
+    grep 'inport ==' | ovn_strip_lflows | sort], [0], [])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD_NO_HV([
 AT_SETUP([LSP incremental processing of router port metadata])
 AT_KEYWORDS([incremental processing])
 ovn_start

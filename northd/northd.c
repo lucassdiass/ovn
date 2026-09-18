@@ -1577,6 +1577,32 @@ tag_alloc_create_new_tag(struct hmap *tag_alloc_table,
         nbrec_logical_switch_port_set_tag(nbsp, NULL, 0);
     }
 }
+
+/* The half of tag_alloc_create_new_tag() that needs no per-parent allocation
+ * pool: derive 'tag' -- which ovn-northd owns -- from 'tag_request', the
+ * column the CMS writes.  A recompute does this from build_ports(); the
+ * incremental logical switch port paths call it so that
+ * ovn_port_update_sbrec() copies an up-to-date tag into the SB port binding.
+ *
+ * Dynamic allocation -- a 'tag_request' of 0 on a port that has a parent -- is
+ * the one case that needs the pool, and lsp_can_be_inc_processed() keeps it
+ * off this path. */
+static void
+lsp_sync_tag(const struct nbrec_logical_switch_port *nbsp)
+{
+    ovs_assert(!(nbsp->parent_name && nbsp->parent_name[0] &&
+                 nbsp->tag_request && !nbsp->tag_request[0]));
+
+    if (nbsp->tag_request && nbsp->tag_request[0]) {
+        if (!nbsp->tag || nbsp->tag[0] != nbsp->tag_request[0]) {
+            nbrec_logical_switch_port_set_tag(nbsp, nbsp->tag_request, 1);
+        }
+    } else if (nbsp->tag) {
+        /* Either the request is gone or it is a 0 on a port without a parent.
+         * Both leave nothing to derive, so drop the stale tag. */
+        nbrec_logical_switch_port_set_tag(nbsp, NULL, 0);
+    }
+}
 
 
 static void
@@ -4886,9 +4912,13 @@ lsp_can_be_inc_processed(const struct nbrec_logical_switch_port *nbsp)
         return false;
     }
 
-    /* Tag allocation is not supported for now. */
-    if ((nbsp->parent_name && nbsp->parent_name[0]) || nbsp->tag ||
-        nbsp->tag_request) {
+    /* A container (nested) port is supported, but dynamic tag allocation is
+     * not: a 'tag_request' of 0 on a port that has a parent makes northd pick
+     * a tag that is unique within the parent's scope, out of a per-parent pool
+     * (tag_alloc_table) that only a recompute builds.  Every other shape is
+     * derived by lsp_sync_tag(). */
+    if (nbsp->parent_name && nbsp->parent_name[0] &&
+        nbsp->tag_request && !nbsp->tag_request[0]) {
         return false;
     }
 
@@ -5374,6 +5404,11 @@ ls_port_init(struct ovn_port *op, struct ovsdb_idl_txn *ovnsb_txn,
         op->sb = sbrec_port_binding_insert(ovnsb_txn);
         sbrec_port_binding_set_logical_port(op->sb, op->key);
     }
+
+    /* ovn_port_update_sbrec() copies 'tag' into the SB port binding, so it has
+     * to be derived from 'tag_request' first. */
+    lsp_sync_tag(op->nbsp);
+
     ovn_port_update_sbrec(ovnsb_txn, sbrec_chassis_by_name,
                           sbrec_chassis_by_hostname, NULL, sbrec_mirror_table,
                           sbrec_encap_by_ip,
@@ -23506,10 +23541,17 @@ lflow_handle_northd_port_changes(struct ovsdb_idl_txn *ovnsb_txn,
     struct hmapx_node *hmapx_node;
     struct ovn_port *op;
 
-    /* Logical switches whose set of router ports changed.  The per-switch
-     * ls_stateful lflow_ref contains skip-conntrack flows generated for each
-     * router port (see build_ls_stateful_rec_pre_lb()/_pre_acls()), so it must
-     * be regenerated when a router port is created or deleted. */
+    /* Logical switches whose per-switch ls_stateful lflow_ref has to be
+     * regenerated, because it owns flows that depend on the switch's set of
+     * ports rather than on any single one of them:
+     *
+     *  - the skip-conntrack flows generated for each router port (see
+     *    build_ls_stateful_rec_pre_lb()/_pre_acls());
+     *
+     *  - the network function flows, whose inport and outport resolve to the
+     *    named port *or to a container port parented to it* (see
+     *    build_network_function() and ovn_port_find_port_or_child()), so a
+     *    container port coming or going changes them too. */
     struct hmapx ls_stateful_regen = HMAPX_INITIALIZER(&ls_stateful_regen);
 
     HMAPX_FOR_EACH (hmapx_node, &trk_lsps->deleted) {
@@ -23517,6 +23559,12 @@ lflow_handle_northd_port_changes(struct ovsdb_idl_txn *ovnsb_txn,
         /* Make sure 'op' is an lsp and not lrp. */
         ovs_assert(op->nbsp);
         if (lsp_is_router(op->nbsp) && op->peer) {
+            hmapx_add(&ls_stateful_regen, op->od);
+        }
+        /* 'op->nbsp' is the row as it is now -- on a type change it is shared
+         * with the port that replaced this one -- so whether the port that is
+         * going away had a parent is read from its SB row. */
+        if (op->sb && op->sb->parent_port) {
             hmapx_add(&ls_stateful_regen, op->od);
         }
         bool handled = lflow_ref_resync_flows(
@@ -23592,6 +23640,9 @@ lflow_handle_northd_port_changes(struct ovsdb_idl_txn *ovnsb_txn,
         /* Make sure 'op' is an lsp and not lrp. */
         ovs_assert(op->nbsp);
         if (lsp_is_router(op->nbsp) && op->peer) {
+            hmapx_add(&ls_stateful_regen, op->od);
+        }
+        if (op->nbsp->parent_name && op->nbsp->parent_name[0]) {
             hmapx_add(&ls_stateful_regen, op->od);
         }
 
