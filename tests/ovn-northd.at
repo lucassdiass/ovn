@@ -13682,23 +13682,48 @@ check ovn-nbctl lr-add lr1
 check ovn-nbctl lrp-add lr0 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
 check ovn-nbctl lrp-add lr1 lr1-sw0 00:00:00:00:ff:02 20.0.0.1/24
 
+check ovn-nbctl lb-add lb0 10.0.0.10:80 20.0.0.10:8080
+check ovn-nbctl --wait=sb lr-lb-add lr1 lb0
+
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr0 lr0-sw0
 check_engine_compute northd incremental
 
-# Connecting the same switch to a second logical router must fall back to
-# recompute: the two routers are merged into a single logical router group,
-# which is only computed by a full recompute.
+# Connecting the switch to a second logical router is supported, but not when
+# that router has a load balancer: its VIPs reach the switch through
+# dependencies that live outside the port's lflow_ref.
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr1 lr1-sw0
 check_engine_compute northd recompute
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
-# Deleting one of them must also fall back to recompute.
+# The same dependency of a router already on the switch rules out adding a
+# third one, whose own router is otherwise unremarkable.
+check ovn-nbctl lr-add lr2
+check ovn-nbctl --wait=sb lrp-add lr2 lr2-sw0 00:00:00:00:ff:03 30.0.0.1/24
+
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
-check ovn-nbctl --wait=sb lsp-del sw0-lr1
+check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr2 lr2-sw0
 check_engine_compute northd recompute
+check_engine_compute lflow recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# And removing one of them.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del sw0-lr2
+check_engine_compute northd recompute
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Once the load balancer is gone, so is the fallback.
+check ovn-nbctl --wait=sb lr-lb-del lr1 lb0
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr2 lr2-sw0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
 
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
@@ -13761,41 +13786,6 @@ CHECK_NO_CHANGE_AFTER_RECOMPUTE
 OVN_CLEANUP_NORTHD
 AT_CLEANUP
 
-AT_SETUP([Router port incremental processing fallback with distributed gateway])
-AT_KEYWORDS([incremental processing])
-ovn_start
-
-check ovn-sbctl chassis-add gw1 geneve 127.0.0.1
-
-check ovn-nbctl ls-add sw0
-check ovn-nbctl lr-add lr0
-
-# Distributed gateway port on lr0.
-check ovn-nbctl ls-add public
-check ovn-nbctl lrp-add lr0 lr0-public 00:00:20:20:12:13 172.168.0.100/24
-check ovn-nbctl --wait=sb lsp-add-router-port public public-lr0 lr0-public
-check ovn-nbctl lsp-add-localnet-port public ln-public public
-check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-public gw1 20
-
-check ovn-nbctl lrp-add lr0 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
-
-# Connecting a switch to a router that has a distributed gateway port must fall
-# back to recompute (l3gateway/chassisredirect SB types and GARP nat_addresses
-# depend on state outside the switch port's lflow_ref).
-check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
-check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr0 lr0-sw0
-check_engine_compute northd recompute
-
-# Deleting it must also fall back to recompute.
-check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
-check ovn-nbctl --wait=sb lsp-del sw0-lr0
-check_engine_compute northd recompute
-
-CHECK_NO_CHANGE_AFTER_RECOMPUTE
-
-OVN_CLEANUP_NORTHD
-AT_CLEANUP
-
 AT_SETUP([Router port incremental processing fallback with dynamic routing])
 AT_KEYWORDS([incremental processing])
 ovn_start
@@ -13817,6 +13807,357 @@ check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lsp-del sw0-lr0
 check_engine_compute northd recompute
 
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+
+AT_SETUP([LSP incremental processing of several routers on one switch])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-nbctl ls-add sw0
+check ovn-nbctl lr-add lr0
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lrp-add lr0 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
+check ovn-nbctl --wait=sb lrp-add lr1 lr1-sw0 00:00:00:00:ff:02 10.0.1.1/24
+
+# The first router port of the switch.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr0 lr0-sw0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A second router port peering with an LRP of a *different* logical router is
+# incrementally processed too.  The two routers now reach each other through
+# sw0, so each one's ARP_RESOLVE table learns the other's port.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr1 lr1-sw0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.1.1'], [0], [1
+])
+AT_CHECK([ovn-sbctl lflow-list lr1 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.0.1'], [0], [1
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# And a third one.
+check ovn-nbctl lr-add lr2
+check ovn-nbctl --wait=sb lrp-add lr2 lr2-sw0 00:00:00:00:ff:03 10.0.2.1/24
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port sw0 sw0-lr2 lr2-sw0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.2.1'], [0], [1
+])
+AT_CHECK([ovn-sbctl lflow-list lr2 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.0.1'], [0], [1
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Wiring from the logical router port side: the switch port is created first,
+# naming an LRP that does not exist yet, and the LRP shows up afterwards.
+check ovn-nbctl lr-add lr3
+check ovn-nbctl --wait=sb lsp-add sw0 sw0-lr3 \
+    -- lsp-set-type sw0-lr3 router \
+    -- lsp-set-addresses sw0-lr3 router \
+    -- lsp-set-options sw0-lr3 router-port=lr3-sw0
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-add lr3 lr3-sw0 00:00:00:00:ff:04 10.0.3.1/24
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.3.1'], [0], [1
+])
+AT_CHECK([ovn-sbctl lflow-list lr3 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.0.1'], [0], [1
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Removing one of them is incrementally processed as well, and the ARP-resolve
+# flows the others had for it go away.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del sw0-lr2
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.2.1'], [1], [0
+])
+AT_CHECK([ovn-sbctl lflow-list lr2 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.0.1'], [1], [0
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Deleting the logical router port unwires the peering from the other side.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-del lr3-sw0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 10.0.3.1'], [1], [0
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+
+AT_SETUP([LSP incremental processing of several routers on one switch - groups])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-sbctl chassis-add hv1 geneve 10.0.0.1
+check ovn-sbctl chassis-add hv2 geneve 10.0.0.2
+
+# An external network: a logical switch with a localnet port, a distributed
+# gateway port of lr0 with a multi-chassis gateway, and a VIF of lr0's tenant
+# network bound to hv1.
+check ovn-nbctl ls-add ext
+check ovn-nbctl --wait=sb lsp-add ext ln-ext \
+    -- lsp-set-type ln-ext localnet \
+    -- lsp-set-addresses ln-ext unknown \
+    -- lsp-set-options ln-ext network_name=phys
+
+check ovn-nbctl ls-add ls0
+check ovn-nbctl --wait=sb lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 192.168.0.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls0 ls0-lr0 lr0-ls0
+check ovn-nbctl --wait=sb lsp-add ls0 vif0 \
+    -- lsp-set-addresses vif0 "aa:aa:aa:00:00:01 192.168.0.11"
+check ovn-sbctl lsp-bind vif0 hv1
+
+check ovn-nbctl lrp-add lr0 lr0-ext 00:00:00:00:ff:02 172.16.0.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ext ext-lr0 lr0-ext
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lr0-ext hv1 20 -- \
+    lrp-set-gateway-chassis lr0-ext hv2 10
+
+# A second router, not connected to the first one, with a VIF bound to hv2.
+check ovn-nbctl ls-add ls1
+check ovn-nbctl --wait=sb lr-add lr1
+check ovn-nbctl lrp-add lr1 lr1-ls1 00:00:00:00:ee:01 192.168.1.1/24
+check ovn-nbctl --wait=sb lsp-add-router-port ls1 ls1-lr1 lr1-ls1
+check ovn-nbctl --wait=sb lsp-add ls1 vif1 \
+    -- lsp-set-addresses vif1 "aa:aa:aa:00:00:02 192.168.1.11"
+check ovn-sbctl lsp-bind vif1 hv2
+check ovn-nbctl --wait=sb sync
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# lr1 is in a router group of its own, so hv2 is not referenced by lr0's HA
+# chassis group.
+CHECK_HA_CHASSIS_GROUP([lr0-ext], [10
+20], [hv1])
+
+# Attaching lr1 to the external network puts the two routers in the same
+# router group, which is what en_sync_from_sb walks to build 'ref_chassis':
+# hv2, where a port of lr1's tenant network is bound, joins it.
+check ovn-nbctl --wait=sb lrp-add lr1 lr1-ext 00:00:00:00:ee:02 172.16.0.2/24
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port ext ext-lr1 lr1-ext
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+CHECK_HA_CHASSIS_GROUP([lr0-ext], [10
+20], [hv1 hv2])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Detaching it again splits the group back in two.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del ext-lr1
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+CHECK_HA_CHASSIS_GROUP([lr0-ext], [10
+20], [hv1])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The same from the logical router port side: the switch port is created
+# first, and the logical router port that completes the peering follows.
+check ovn-nbctl --wait=sb lrp-del lr1-ext
+check ovn-nbctl --wait=sb lsp-add ext ext-lr1 \
+    -- lsp-set-type ext-lr1 router \
+    -- lsp-set-addresses ext-lr1 router \
+    -- lsp-set-options ext-lr1 router-port=lr1-ext
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-add lr1 lr1-ext 00:00:00:00:ee:02 172.16.0.2/24
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+CHECK_HA_CHASSIS_GROUP([lr0-ext], [10
+20], [hv1 hv2])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# And deleting that logical router port splits the group again.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-del lr1-ext
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+
+CHECK_HA_CHASSIS_GROUP([lr0-ext], [10
+20], [hv1])
+
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+
+AT_SETUP([Router port incremental processing of a regular port of a router with a distributed gateway])
+AT_KEYWORDS([incremental processing])
+ovn_start
+
+check ovn-sbctl chassis-add gw1 geneve 127.0.0.1
+check ovn-sbctl chassis-add gw2 geneve 127.0.0.2
+
+# A router shaped like a Neutron one: a distributed gateway port towards an
+# external network with a localnet port, a regular port towards a tenant
+# network, SNAT, a distributed dnat_and_snat, a default route, gateway_mtu and
+# a CoPP.
+check ovn-nbctl ls-add public
+check ovn-nbctl lsp-add-localnet-port public ln-public public
+check ovn-nbctl ls-add sw0
+check ovn-nbctl lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-public 00:00:20:20:12:13 \
+    172.168.0.100/24 2001:db8::100/64
+check ovn-nbctl lrp-set-gateway-chassis lr0-public gw1 20
+check ovn-nbctl lrp-set-gateway-chassis lr0-public gw2 10
+check ovn-nbctl set logical_router_port lr0-public options:gateway_mtu=1400
+check ovn-nbctl lsp-add-router-port public public-lr0 lr0-public
+check ovn-nbctl lrp-add lr0 lr0-sw0 00:00:00:00:ff:01 10.0.0.1/24
+check ovn-nbctl lsp-add-router-port sw0 sw0-lr0 lr0-sw0
+check ovn-nbctl lsp-add sw0 sw0-vm1 \
+    -- lsp-set-addresses sw0-vm1 "00:00:00:00:00:11 10.0.0.11"
+check ovn-nbctl lr-nat-add lr0 snat 172.168.0.100 10.0.0.0/24
+check ovn-nbctl lr-nat-add lr0 dnat_and_snat 172.168.0.110 10.0.0.11 \
+    sw0-vm1 00:00:00:00:01:11
+check ovn-nbctl lr-route-add lr0 0.0.0.0/0 172.168.0.1
+check ovn-nbctl meter-add meter0 drop 100 pktps 10
+check ovn-nbctl copp-add copp0 arp-resolve meter0
+check ovn-nbctl lr-copp-add copp0 lr0
+
+# Another, plain, router already on the switch lr0 is going to join.
+check ovn-nbctl ls-add sw1
+check ovn-nbctl lr-add lr1
+check ovn-nbctl lrp-add lr1 lr1-sw1 00:00:00:00:ee:01 192.168.10.1/24
+check ovn-nbctl lsp-add-router-port sw1 sw1-lr1 lr1-sw1
+check ovn-nbctl --wait=sb lrp-add lr0 lr0-sw1 00:00:00:00:ff:02 \
+    192.168.10.2/24
+
+# A port of lr1's network bound to a chassis of its own.
+check ovn-sbctl chassis-add hv1 geneve 127.0.0.11
+check ovn-nbctl --wait=sb lsp-add sw1 sw1-vm1 \
+    -- lsp-set-addresses sw1-vm1 "00:00:00:00:00:21 192.168.10.11"
+check ovn-sbctl lsp-bind sw1-vm1 hv1
+check ovn-nbctl --wait=sb sync
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+CHECK_HA_CHASSIS_GROUP([lr0-public], [10
+20], [])
+
+# Connecting a regular port of lr0 to that switch the way Neutron does, a
+# plain port turned into a router port and given its addresses afterwards, is
+# incrementally processed.  lr0 and lr1 end up in the same router group, so hv1
+# joins the 'ref_chassis' of lr0's gateway.
+check ovn-nbctl --wait=sb lsp-add sw1 sw1-lr0
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb set Logical_Switch_Port sw1-lr0 type=router \
+    options:router-port=lr0-sw1
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+AT_CHECK([ovn-sbctl lflow-list lr1 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 192.168.10.2'], [0], [1
+])
+CHECK_HA_CHASSIS_GROUP([lr0-public], [10
+20], [hv1])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-set-addresses sw1-lr0 router
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# Disconnecting it is incrementally processed too.
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del sw1-lr0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+AT_CHECK([ovn-sbctl lflow-list lr1 | grep lr_in_arp_resolve | grep -c \
+    'reg0 == 192.168.10.2'], [1], [0
+])
+CHECK_HA_CHASSIS_GROUP([lr0-public], [10
+20], [])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# A switch with a localnet port.
+check ovn-nbctl ls-add sw2
+check ovn-nbctl lsp-add-localnet-port sw2 ln-sw2 phys2
+check ovn-nbctl --wait=sb lrp-add lr0 lr0-sw2 00:00:00:00:ff:03 \
+    192.168.20.1/24 2001:db8:20::1/64
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port sw2 sw2-lr0 lr0-sw2
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del sw2-lr0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# With the router port residing on the gateway chassis, its own ARP/ND flows
+# and the switch's unicast lookup gain is_chassis_resident() checks for the
+# gateway port, and the switch port's binding GARPs for the router port.
+check ovn-nbctl --wait=sb set logical_router_port lr0-sw2 \
+    options:reside-on-redirect-chassis=true
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-add-router-port sw2 sw2-lr0 lr0-sw2 \
+    -- lsp-set-options sw2-lr0 router-port=lr0-sw2 nat-addresses=router
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_ip_input | \
+    grep 'arp.spa == 192.168.20.0/24' | grep -c 'is_chassis_resident'],
+    [0], [ignore])
+AT_CHECK([ovn-sbctl get port_binding sw2-lr0 nat_addresses | \
+    grep -c 192.168.20.1], [0], [ignore])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lsp-del sw2-lr0
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_ip_input | \
+    grep 'arp.spa == 192.168.20.0/24' | grep -c 'is_chassis_resident'],
+    [1], [0
+])
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+# The same from the logical router port side: the switch port is there first,
+# waiting for a router port that shows up afterwards, and goes away again.
+check ovn-nbctl ls-add sw3
+check ovn-nbctl lsp-add-localnet-port sw3 ln-sw3 phys3
+check ovn-nbctl --wait=sb lsp-add-router-port sw3 sw3-lr0 lr0-sw3
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-add lr0 lr0-sw3 00:00:00:00:ff:04 \
+    192.168.30.1/24
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
+CHECK_NO_CHANGE_AFTER_RECOMPUTE
+
+check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
+check ovn-nbctl --wait=sb lrp-del lr0-sw3
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
 OVN_CLEANUP_NORTHD
@@ -14161,20 +14502,20 @@ check_engine_compute northd incremental
 check_engine_compute lflow incremental
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
-# A regular port whose peer "router" LSP already exists falls back: on such a
-# router its own flows depend on the peer switch through is_chassis_resident()
-# checks.
+# So is a regular port whose peer "router" LSP already exists, and deleting
+# it again.
 check ovn-nbctl ls-add sw4
 check ovn-nbctl --wait=sb lsp-add-router-port sw4 sw4-lr0 lr0-sw4
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lrp-add lr0 lr0-sw4 00:00:00:00:ff:05 60.0.0.1/24
-check_engine_compute northd recompute
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
-# ... and so does deleting a regular port that is connected to a switch.
 check as northd ovn-appctl -t ovn-northd inc-engine/clear-stats
 check ovn-nbctl --wait=sb lrp-del lr0-sw4
-check_engine_compute northd recompute
+check_engine_compute northd incremental
+check_engine_compute lflow incremental
 CHECK_NO_CHANGE_AFTER_RECOMPUTE
 
 OVN_CLEANUP_NORTHD
