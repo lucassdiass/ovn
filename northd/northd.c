@@ -5058,17 +5058,32 @@ router_lsp_switch_needs_recompute(
     return false;
 }
 
+/* Where a router port of a logical switch stands with respect to the change
+ * being processed. */
+enum router_lsp_role {
+    /* The port whose peering is being wired up. */
+    ROUTER_LSP_WIRED,
+    /* The port whose peering is being torn down.  It is still counted in
+     * od->router_ports at this point. */
+    ROUTER_LSP_UNWIRED,
+    /* A port that is merely already on the switch and stays. */
+    ROUTER_LSP_SIBLING,
+};
+
 /* The dependencies that the "router" LSP 'nbsp' of the logical switch 'od'
  * pulls in from the logical router port 'peer' it is peered with, and from the
  * logical router that owns 'peer'.  Return true when any of them is present,
  * so the caller falls back to a full recompute.
  *
- * 'is_delete' is true when 'nbsp' is being removed (the port is still counted
- * in od->router_ports at this point). */
+ * The checks that are about the peering coming or going are skipped for a
+ * ROUTER_LSP_SIBLING: nothing of that port changes, and
+ * ls_router_ports_changed() regenerates the flows of both its ends.  What is
+ * left are the dependencies that the presence of another router on the switch
+ * feeds into. */
 static bool
 router_lsp_peer_needs_recompute(struct ovn_datapath *od,
-                                const struct nbrec_logical_switch_port *nbsp,
-                                const struct ovn_port *peer, bool is_delete)
+                                const struct ovn_port *peer,
+                                enum router_lsp_role role)
 {
     /* Bad LRP-to-LRP peering or a disabled LRP; let recompute deal with it. */
     if (peer->nbrp->peer || !lrport_is_enabled(peer->nbrp)) {
@@ -5078,7 +5093,7 @@ router_lsp_peer_needs_recompute(struct ovn_datapath *od,
     /* The LRP is already peered with another switch port.  A recompute would
      * pick one of the two non-deterministically; let it deal with such a
      * misconfiguration. */
-    if (!is_delete && peer->peer && peer->peer->nbsp != nbsp) {
+    if (role == ROUTER_LSP_WIRED && peer->peer) {
         return true;
     }
 
@@ -5089,45 +5104,60 @@ router_lsp_peer_needs_recompute(struct ovn_datapath *od,
         return true;
     }
 
-    /* A distributed gateway port (DGP) peer is supported on creation only, by
-     * ls_router_port_wire_dgp_peer().  Removing the peer of a DGP would have
-     * to undo more than the peer wiring, which this path does not do. */
-    if (peer->nbrp->n_gateway_chassis || peer->nbrp->ha_chassis_group) {
-        if (is_delete || !lrp_is_l3dgw(peer)) {
-            return true;
+    /* Everything a distributed gateway port (DGP) brings in is about the
+     * peering coming or going, so none of it concerns a sibling: its
+     * chassisredirect port is not affected (peer_needs_cr_port_creation()
+     * reads the localnet ports of the switch and the DGP count of the router,
+     * and another router port changes neither), and the flows that depend on
+     * it having a peer switch port are regenerated along with the port. */
+    if (role != ROUTER_LSP_SIBLING) {
+        /* A DGP peer is supported on creation only, by
+         * ls_router_port_wire_dgp_peer().  Removing the peer of a DGP would
+         * have to undo more than the peer wiring, which this path does not
+         * do. */
+        if (peer->nbrp->n_gateway_chassis || peer->nbrp->ha_chassis_group) {
+            if (role == ROUTER_LSP_UNWIRED || !lrp_is_l3dgw(peer)) {
+                return true;
+            }
+
+            /* With more than one DGP on the router the DGPs generate flows
+             * for each other. */
+            if (vector_len(&peer->od->l3dgw_ports) > 1) {
+                return true;
+            }
+
+            /* Only a switch that already has a localnet port -- the shape
+             * Neutron gives an external network -- is supported.  Without
+             * one, peer_needs_cr_port_creation() turns true and the switch
+             * port gets a chassisredirect port of its own, which in turn
+             * makes build_lrouter_nat_arp_nd_flow() answer ARP/ND for the
+             * router's NAT external IPs through flows owned by the router's
+             * lr_stateful record, a reference this path can't have
+             * regenerated. */
+            if (!ls_nb_has_localnet_port(od)) {
+                return true;
+            }
         }
 
-        /* With more than one DGP on the router the DGPs generate flows for
-         * each other. */
-        if (vector_len(&peer->od->l3dgw_ports) > 1) {
-            return true;
-        }
-
-        /* Only a switch that already has a localnet port -- the shape Neutron
-         * gives an external network -- is supported.  Without one,
-         * peer_needs_cr_port_creation() turns true and the switch port gets a
-         * chassisredirect port of its own, which in turn makes
-         * build_lrouter_nat_arp_nd_flow() answer ARP/ND for the router's NAT
-         * external IPs through flows owned by the router's lr_stateful
-         * record, a reference this path can't have regenerated. */
-        if (!ls_nb_has_localnet_port(od)) {
-            return true;
-        }
+        /* A regular port of a router that has a DGP elsewhere needs nothing
+         * more.  What the peering changes for it is either in its own flows
+         * -- with "reside-on-redirect-chassis" and a localnet port on the
+         * switch, its ARP/ND responder flows gain is_chassis_resident()
+         * checks (see build_lrouter_ipv4_ip_input()) -- which
+         * ls_router_ports_changed() regenerates by re-tracking the peer of
+         * every router port of the switch, or in the switch port's own flows
+         * and SB port binding (the same checks in
+         * build_lswitch_ip_unicast_lookup(), the router port GARPs of
+         * should_add_router_port_garp()), which are redone with the switch
+         * port. */
     }
-
-    /* A regular port of a router that has a DGP elsewhere needs nothing more.
-     * What the peering changes for it is either in its own flows -- with
-     * "reside-on-redirect-chassis" and a localnet port on the switch, its
-     * ARP/ND responder flows gain is_chassis_resident() checks (see
-     * build_lrouter_ipv4_ip_input()) -- which ls_router_ports_changed()
-     * regenerates by re-tracking the peer of every router port of the switch,
-     * or in the switch port's own flows and SB port binding (the same checks
-     * in build_lswitch_ip_unicast_lookup(), the router port GARPs of
-     * should_add_router_port_garp()), which are redone with the switch
-     * port. */
 
     /* LBs and dynamic routing on the peer router pull in
      * stateful/routable/advertised-route dependencies not tracked here.
+     * These do concern a sibling: with dynamic routing the peer router
+     * advertises what it reaches through the switch, which the routers on the
+     * other router ports feed (see build_nat_connected_routes() and
+     * build_lb_connected_routes(), both of which walk peer_od->router_ports).
      *
      * Static routes are not among them: they resolve their output port
      * against the router's own LRPs (see find_static_route_outport()), a set
@@ -5179,7 +5209,8 @@ ls_sibling_router_ports_need_recompute(
         if (rp->nbsp == nbsp || !rp->peer) {
             continue;
         }
-        if (router_lsp_peer_needs_recompute(od, rp->nbsp, rp->peer, false)) {
+        if (router_lsp_peer_needs_recompute(od, rp->peer,
+                                            ROUTER_LSP_SIBLING)) {
             return true;
         }
     }
@@ -5223,7 +5254,9 @@ router_lsp_needs_recompute(struct ovn_datapath *od,
         return false;
     }
 
-    return router_lsp_peer_needs_recompute(od, nbsp, peer, is_delete)
+    return router_lsp_peer_needs_recompute(
+               od, peer,
+               is_delete ? ROUTER_LSP_UNWIRED : ROUTER_LSP_WIRED)
            || ls_sibling_router_ports_need_recompute(od, nbsp);
 }
 
