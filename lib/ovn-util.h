@@ -684,6 +684,18 @@ strip_leading_zero(const char *s)
     return s + strspn(s, "0");
 }
 
+/* Like strcmp(), but also accepts NULL arguments.  Two NULLs compare equal
+ * and NULL sorts before any non-NULL string, so !nullable_strcmp(a, b) is
+ * equivalent to nullable_string_is_equal(a, b). */
+static inline int
+nullable_strcmp(const char *a, const char *b)
+{
+    if (!a || !b) {
+        return !!a - !!b;
+    }
+    return strcmp(a, b);
+}
+
 static inline bool
 is_uuid_with_prefix(const char *uuid)
 {
