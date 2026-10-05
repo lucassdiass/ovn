@@ -12756,8 +12756,7 @@ parsed_route_lookup(struct hmap *routes, size_t hash,
             continue;
         }
 
-        if (!nullable_string_is_equal(pr->lrp_addr_s,
-                                      new_pr->lrp_addr_s)) {
+        if (nullable_strcmp(pr->lrp_addr_s, new_pr->lrp_addr_s)) {
             continue;
         }
 

@@ -1131,7 +1131,7 @@ ovn_lflow_equal(const struct ovn_lflow *a, const struct ovn_stage *stage,
             && a->priority == priority
             && !strcmp(a->match, match)
             && !strcmp(a->actions, actions)
-            && nullable_string_is_equal(a->ctrl_meter, ctrl_meter)
+            && !nullable_strcmp(a->ctrl_meter, ctrl_meter)
             && a->acl_ct_translation == acl_ct_translation);
 }
 

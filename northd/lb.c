@@ -345,8 +345,8 @@ ovn_northd_lb_init(struct ovn_northd_lb *lb,
                    const struct nbrec_load_balancer *nbrec_lb)
 {
     bool template = smap_get_bool(&nbrec_lb->options, "template", false);
-    bool is_udp = nullable_string_is_equal(nbrec_lb->protocol, "udp");
-    bool is_sctp = nullable_string_is_equal(nbrec_lb->protocol, "sctp");
+    bool is_udp = !nullable_strcmp(nbrec_lb->protocol, "udp");
+    bool is_sctp = !nullable_strcmp(nbrec_lb->protocol, "sctp");
     int address_family = !strcmp(smap_get_def(&nbrec_lb->options,
                                               "address-family", "ipv4"),
                                  "ipv4")
