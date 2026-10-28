@@ -352,6 +352,11 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
                      route_sb_datapath_binding_handler);
     engine_add_input(&en_route, &en_sb_learned_route,
                      route_sb_learned_route_handler);
+    /* Routes are not learned/advertised through a distributed gateway port
+     * whose chassisredirect port has no chassis, so (un)binding of such a
+     * port is scoped to its router's transit switches. */
+    engine_add_input(&en_route, &en_sb_port_binding,
+                     route_sb_port_binding_handler);
 
     /* en_service_monitor: sync load-balancer health checks across AZs.
      *

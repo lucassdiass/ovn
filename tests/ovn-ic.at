@@ -525,6 +525,84 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- route sync with DGP chassisredirect without chassis])
+
+ovn_init_ic_db
+net_add n1
+
+# 1 GW per AZ
+for i in 1 2; do
+    az=az$i
+    ovn_start $az
+    sim_add gw-$az
+    as gw-$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach $az n1 br-phys 192.168.1.$i
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+    check ovn-nbctl set nb-global . \
+        options:ic-route-adv=true \
+        options:ic-route-learn=true
+done
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb ts-add ts1
+
+for i in 1 2; do
+    ovn_as az$i
+    check ovn-nbctl lr-add lr1
+    check ovn-nbctl lrp-add lr1 lrp-int 00:00:00:00:0$i:01 10.0.$i.1/24
+    check ovn-nbctl lrp-add lr1 lrp-ts 00:00:00:00:0$i:02 169.254.100.$i/24
+    check ovn-nbctl lrp-set-gateway-chassis lrp-ts gw-az$i
+    check ovn-nbctl --wait=sb lsp-add-router-port ts1 lsp-ts-az$i lrp-ts
+done
+
+# Both AZs advertise their connected subnet and learn the remote one.
+wait_row_count ic-sb:Route 1 ip_prefix=10.0.1.1/24
+wait_row_count ic-sb:Route 1 ip_prefix=10.0.2.1/24
+ovn_as az1 wait_row_count nb:Logical_Router_Static_Route 1 \
+    ip_prefix=10.0.2.1/24 nexthop=169.254.100.2
+ovn_as az2 wait_row_count nb:Logical_Router_Static_Route 1 \
+    ip_prefix=10.0.1.1/24 nexthop=169.254.100.1
+
+# Move the DGP of az1 to a chassis that doesn't exist: its chassisredirect
+# port is left without chassis.  Routes must be neither advertised nor
+# learned through it anymore.
+ovn_as az1
+check ovn-nbctl lrp-del-gateway-chassis lrp-ts gw-az1
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lrp-ts fake-chassis
+wait_row_count Port_Binding 1 logical_port=cr-lrp-ts
+check_column "" Port_Binding chassis logical_port=cr-lrp-ts
+
+wait_row_count ic-sb:Route 0 ip_prefix=10.0.1.1/24
+check_row_count ic-sb:Route 1 ip_prefix=10.0.2.1/24
+wait_row_count nb:Logical_Router_Static_Route 0 ip_prefix=10.0.2.1/24
+ovn_as az2 wait_row_count nb:Logical_Router_Static_Route 0 \
+    ip_prefix=10.0.1.1/24
+
+# Bind the chassisredirect port again: routes are advertised and learned.
+ovn_as az1
+check ovn-nbctl lrp-del-gateway-chassis lrp-ts fake-chassis
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lrp-ts gw-az1
+gw_az1=$(fetch_column Chassis _uuid name=gw-az1)
+wait_column "$gw_az1" Port_Binding chassis logical_port=cr-lrp-ts
+
+wait_row_count ic-sb:Route 1 ip_prefix=10.0.1.1/24
+wait_row_count nb:Logical_Router_Static_Route 1 \
+    ip_prefix=10.0.2.1/24 nexthop=169.254.100.2
+ovn_as az2 wait_row_count nb:Logical_Router_Static_Route 1 \
+    ip_prefix=10.0.1.1/24 nexthop=169.254.100.1
+
+for i in 1 2; do
+    az=az$i
+    ovn_as $az
+    OVN_CLEANUP_SBOX(gw-$az)
+    OVN_CLEANUP_AZ([$az])
+done
+OVN_CLEANUP_IC
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
 AT_SETUP([ovn-ic -- no-chassis transit switch port])
 
 ovn_init_ic_db

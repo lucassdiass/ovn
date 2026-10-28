@@ -826,6 +826,26 @@ get_lrp_name_by_ts_port_name(struct ic_context *ctx, const char *ts_port_name)
     return smap_get(&nb_lsp->options, "router-port");
 }
 
+/* Returns true if 'lrp' is a distributed gateway port whose chassisredirect
+ * port is not bound to any chassis.  Routes must not be learned or advertised
+ * through such a port, as no chassis is able to forward its traffic.
+ * False otherwise. */
+static bool
+lrp_is_dgp_without_chassis(struct ic_context *ctx,
+                           const struct nbrec_logical_router_port *lrp)
+{
+    if (!lrp) {
+        return false;
+    }
+
+    char *crp_name = ovn_chassis_redirect_name(lrp->name);
+    const struct sbrec_port_binding *crp =
+        find_sb_pb_by_name(ctx->sbrec_port_binding_by_name, crp_name);
+    free(crp_name);
+
+    return crp && !crp->chassis;
+}
+
 static const struct nbrec_logical_router_port *
 find_lrp_of_nexthop(struct ic_context *ctx,
                     const struct icsbrec_route *isb_route)
@@ -1021,6 +1041,11 @@ sync_learned_routes(struct ic_context *ctx,
         }
         lrp_name = get_lrp_name_by_ts_port_name(ctx, isb_pb->logical_port);
         lrp = lrp_name ? get_lrp_by_lrp_name(ctx, lrp_name) : NULL;
+        if (lrp_is_dgp_without_chassis(ctx, lrp)) {
+            VLOG_DBG("Skip learning routes on lrp %s: its chassisredirect "
+                     "port is not bound to any chassis.", lrp->name);
+            continue;
+        }
         if (lrp) {
             ts_route_table = smap_get_def(&lrp->options, "route_table", "");
             route_filter_tag = smap_get_def(&lrp->options,
@@ -1516,6 +1541,12 @@ collect_lr_routes(struct ic_context *ctx,
         }
         lrp_name = get_lrp_name_by_ts_port_name(ctx, isb_pb->logical_port);
         lrp = lrp_name ? get_lrp_by_lrp_name(ctx, lrp_name) : NULL;
+        if (lrp_is_dgp_without_chassis(ctx, lrp)) {
+            VLOG_DBG("Skip advertising routes on lrp %s: its chassisredirect "
+                     "port is not bound to any chassis.", lrp->name);
+            destroy_lport_addresses(&ts_port_addrs);
+            continue;
+        }
         if (lrp) {
             route_table = smap_get_def(&lrp->options, "route_table", "");
             route_tag = smap_get_def(&lrp->options, "ic-route-tag", "");
@@ -2743,6 +2774,59 @@ route_sb_learned_route_handler(struct engine_node *node, void *data)
         route_scope_finish(ctx, runned_az, &affected, false, data);
     sset_destroy(&affected);
     route_lr_ts_map_destroy(&lr_ts_map);
+    return ret;
+}
+
+/* SB Port_Binding: routes are neither learned nor advertised through a
+ * distributed gateway port whose chassisredirect port is not bound to any
+ * chassis (see lrp_is_dgp_without_chassis()).  Scope a (un)binding of a
+ * chassisredirect port to the transit switches of the router owning its
+ * distributed port.  Other port binding changes do not affect routes. */
+enum engine_input_handler_result
+route_sb_port_binding_handler(struct engine_node *node, void *data)
+{
+    const struct icsbrec_availability_zone *runned_az;
+    struct ic_context *ctx = route_handler_ctx(node, &runned_az);
+    if (!ctx) {
+        return EN_HANDLED_UNCHANGED;
+    }
+
+    const struct sbrec_port_binding_table *tbl =
+        EN_OVSDB_GET(engine_get_input("SB_port_binding", node));
+    struct shash lr_ts_map;
+    bool lr_ts_map_built = false;
+    struct sset affected = SSET_INITIALIZER(&affected);
+
+    const struct sbrec_port_binding *pb;
+    SBREC_PORT_BINDING_TABLE_FOR_EACH_TRACKED (pb, tbl) {
+        if (!sbrec_port_binding_is_new(pb) &&
+            !sbrec_port_binding_is_deleted(pb) &&
+            !ovsdb_idl_track_is_updated(&pb->header_,
+                                        &sbrec_port_binding_col_chassis)) {
+            continue;
+        }
+        /* Only chassisredirect ports have options:distributed-port ('type'
+         * is not monitored). */
+        const char *lrp_name = smap_get(&pb->options, "distributed-port");
+        const struct nbrec_logical_router_port *lrp =
+            lrp_name ? get_lrp_by_lrp_name(ctx, lrp_name) : NULL;
+        if (!lrp) {
+            continue;
+        }
+        if (!lr_ts_map_built) {
+            route_lr_ts_map_init(ctx, runned_az, &lr_ts_map);
+            lr_ts_map_built = true;
+        }
+        route_scope_add_matching_lrs(ctx, &lr_ts_map, lr_has_port, lrp,
+                                     &affected);
+    }
+
+    enum engine_input_handler_result ret =
+        route_scope_finish(ctx, runned_az, &affected, false, data);
+    sset_destroy(&affected);
+    if (lr_ts_map_built) {
+        route_lr_ts_map_destroy(&lr_ts_map);
+    }
     return ret;
 }
 
