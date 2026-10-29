@@ -37,6 +37,10 @@ Post v26.09.0
        now creates the VRF on every member of the port's HA chassis group
        instead of only on the active one, so the routing daemon can bring
        up its session in the VRF before a failover.
+   - Added the "ic-route-adv-cidrs" option to Logical_Router_Port.  When set
+     on a port connected to a transit switch, ovn-ic advertises through it
+     the listed CIDRs contained in a directly-connected network of the router
+     instead of that whole network.
    - Removed OVN's ovs-bugtool plugin and helper scripts.
    - Removed ovn-sim utility scripts.
    - Removed ovn-docker utility scripts.

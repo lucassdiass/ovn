@@ -556,6 +556,96 @@ add_network_to_routes_ad(struct hmap *routes_ad, const char *network,
                      NULL, nb_lrp, NULL, nb_lr, NULL, route_tag, false);
 }
 
+#define IC_ROUTE_ADV_CIDRS "ic-route-adv-cidrs"
+
+/* Returns true if 'prefix'/'plen' is a subnet of 'net'/'net_plen'. */
+static bool
+prefix_in_network(const struct in6_addr *prefix, unsigned int plen,
+                  const struct in6_addr *net, unsigned int net_plen)
+{
+    if (IN6_IS_ADDR_V4MAPPED(prefix) != IN6_IS_ADDR_V4MAPPED(net)) {
+        return false;
+    }
+
+    /* IPv4 prefix lengths are relative to the mapped address. */
+    unsigned int offset = IN6_IS_ADDR_V4MAPPED(prefix) ? 96 : 0;
+    if (plen < net_plen) {
+        return false;
+    }
+
+    struct in6_addr mask = ipv6_create_mask(net_plen + offset);
+    struct in6_addr a = ipv6_addr_bitand(prefix, &mask);
+    struct in6_addr b = ipv6_addr_bitand(net, &mask);
+    return ipv6_addr_equals(&a, &b);
+}
+
+/* Advertises the CIDRs listed in the "ic-route-adv-cidrs" option of 'ts_lrp'
+ * that are contained in 'network' of 'nb_lrp', instead of 'network' itself.
+ * If the option is not set or none of its CIDRs is contained in 'network',
+ * the whole 'network' is advertised. */
+static void
+add_lrp_network_to_routes_ad(struct hmap *routes_ad, const char *network,
+                             const struct nbrec_logical_router_port *nb_lrp,
+                             const struct lport_addresses *nexthop_addresses,
+                             const struct smap *nb_options,
+                             const struct nbrec_logical_router *nb_lr,
+                             const struct nbrec_logical_router_port *ts_lrp,
+                             const char *route_tag,
+                             const char *ts_route_table)
+{
+    const char *adv_cidrs = ts_lrp ? smap_get(&ts_lrp->options,
+                                              IC_ROUTE_ADV_CIDRS)
+                                   : NULL;
+    struct in6_addr net_prefix;
+    unsigned int net_plen;
+
+    if (!adv_cidrs || !ip46_parse_cidr(network, &net_prefix, &net_plen)) {
+        add_network_to_routes_ad(routes_ad, network, nb_lrp,
+                                 nexthop_addresses, nb_options, nb_lr,
+                                 ts_lrp, route_tag, ts_route_table, false);
+        return;
+    }
+
+    struct sset cidrs = SSET_INITIALIZER(&cidrs);
+    sset_from_delimited_string(&cidrs, adv_cidrs, ",");
+
+    bool found = false;
+    const char *cidr;
+    SSET_FOR_EACH (cidr, &cidrs) {
+        struct in6_addr prefix;
+        unsigned int plen;
+        if (!ip46_parse_cidr(cidr, &prefix, &plen)) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_WARN_RL(&rl, "Bad format in %s of lrp %s: %s",
+                         IC_ROUTE_ADV_CIDRS, ts_lrp->name, cidr);
+            continue;
+        }
+        if (!prefix_in_network(&prefix, plen, &net_prefix, net_plen)) {
+            continue;
+        }
+
+        struct ds masked = DS_EMPTY_INITIALIZER;
+        struct in6_addr mask = ipv6_create_mask(
+            plen + (IN6_IS_ADDR_V4MAPPED(&prefix) ? 96 : 0));
+        prefix = ipv6_addr_bitand(&prefix, &mask);
+        ipv6_format_mapped(&prefix, &masked);
+        ds_put_format(&masked, "/%u", plen);
+
+        add_network_to_routes_ad(routes_ad, ds_cstr(&masked), nb_lrp,
+                                 nexthop_addresses, nb_options, nb_lr,
+                                 ts_lrp, route_tag, ts_route_table, false);
+        ds_destroy(&masked);
+        found = true;
+    }
+    sset_destroy(&cidrs);
+
+    if (!found) {
+        add_network_to_routes_ad(routes_ad, network, nb_lrp,
+                                 nexthop_addresses, nb_options, nb_lr,
+                                 ts_lrp, route_tag, ts_route_table, false);
+    }
+}
+
 static void
 add_lb_vip_to_routes_ad(struct hmap *routes_ad, const char *vip_key,
                         const struct nbrec_load_balancer *nb_lb,
@@ -1398,11 +1488,11 @@ build_ts_routes_to_adv(struct ic_context *ctx,
         const struct nbrec_logical_router_port *lrp = lr->ports[i];
         if (!lrp_is_ts_port(ctx, ic_lr, lrp->name)) {
             for (int j = 0; j < lrp->n_networks; j++) {
-                add_network_to_routes_ad(routes_ad, lrp->networks[j], lrp,
-                                         ts_port_addrs,
-                                         &nb_global->options,
-                                         lr, ts_lrp, route_tag,
-                                         ts_route_table, false);
+                add_lrp_network_to_routes_ad(routes_ad, lrp->networks[j],
+                                             lrp, ts_port_addrs,
+                                             &nb_global->options,
+                                             lr, ts_lrp, route_tag,
+                                             ts_route_table);
             }
         } else {
             /* The router port of the TS port is ignored. */
@@ -2226,7 +2316,8 @@ route_nb_logical_router_handler(struct engine_node *node,
 }
 
 /* NB Logical_Router_Port: networks and options (route_table, ic-route-tag,
- * ic-route-learn-tag-rules, and the deprecated ic-route-filter-tag) affect
+ * ic-route-adv-cidrs, ic-route-learn-tag-rules, and the deprecated
+ * ic-route-filter-tag) affect
  * connected-route advertising and learning for the owning router.  Port
  * creation/deletion changes the router's 'ports' column and is handled by
  * route_nb_logical_router_handler; here only column updates to an existing
