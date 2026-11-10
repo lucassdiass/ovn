@@ -73,6 +73,7 @@ void re_nl_resolve_route(const struct ovn_route_msg *,
 
 int re_nl_create_vrf(const char *ifname, uint32_t table_id);
 int re_nl_delete_vrf(const char *ifname);
+bool re_nl_vrf_has_slaves(const char *ifname);
 
 int re_nl_add_route(uint32_t table_id, const struct advertise_route_entry *);
 int re_nl_delete_route(uint32_t table_id,

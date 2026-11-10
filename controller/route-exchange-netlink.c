@@ -98,6 +98,56 @@ re_nl_delete_vrf(const char *ifname)
     return err;
 }
 
+/* Returns true if at least one interface is enslaved to the VRF 'ifname'.
+ * Returns false if the VRF does not exist, has no slaves or if the links
+ * could not be dumped. */
+bool
+re_nl_vrf_has_slaves(const char *ifname)
+{
+    unsigned int vrf_ifindex = if_nametoindex(ifname);
+    if (!vrf_ifindex) {
+        return false;
+    }
+
+    uint64_t reply_stub[NL_DUMP_BUFSIZE / 8];
+    struct ofpbuf request, reply, buf;
+    struct nl_dump dump;
+    bool has_slaves = false;
+
+    ofpbuf_init(&request, 0);
+    nl_msg_put_nlmsghdr(&request, 0, RTM_GETLINK, NLM_F_REQUEST);
+    ofpbuf_put_zeros(&request, sizeof(struct ifinfomsg));
+    /* Kernels that support it only dump the slaves of the VRF, the master of
+     * every reply is checked below anyway. */
+    nl_msg_put_u32(&request, IFLA_MASTER, vrf_ifindex);
+    nl_dump_start(&dump, NETLINK_ROUTE, &request);
+    ofpbuf_uninit(&request);
+
+    ofpbuf_use_stub(&buf, reply_stub, sizeof reply_stub);
+    while (nl_dump_next(&dump, &reply, &buf)) {
+        if (has_slaves) {
+            /* Drain the dump. */
+            continue;
+        }
+        const struct nlattr *master =
+            nl_attr_find(&reply, NLMSG_HDRLEN + sizeof(struct ifinfomsg),
+                         IFLA_MASTER);
+        if (master && nl_attr_get_u32(master) == vrf_ifindex) {
+            has_slaves = true;
+        }
+    }
+    ofpbuf_uninit(&buf);
+
+    int err = nl_dump_done(&dump);
+    if (err) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
+        VLOG_WARN_RL(&rl, "Failed to dump the interfaces of VRF %s: %s",
+                     ifname, ovs_strerror(err));
+    }
+
+    return has_slaves;
+}
+
 void
 re_route_format(struct ds *ds, uint32_t table_id, const struct in6_addr *dst,
                 unsigned int plen, const struct in6_addr *nexthop, int err)

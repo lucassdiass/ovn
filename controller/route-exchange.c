@@ -582,6 +582,29 @@ out:
     return handled;
 }
 
+/* Stops maintaining the VRF 'vrf_name'.
+ *
+ * The VRF is deleted, unless some interface is still enslaved to it: such
+ * interfaces (e.g. the one a routing daemon uses to peer from the VRF) are
+ * not managed by OVN and deleting the VRF would release them and flush the
+ * routes installed by others in its table.  In that case the VRF is just
+ * disowned, it is adopted again if it needs to be maintained later on.
+ *
+ * Returns 0 on success, a positive errno value if the VRF could not be
+ * deleted. */
+static int
+route_exchange_release_vrf(const char *vrf_name)
+{
+    if (re_nl_vrf_has_slaves(vrf_name)) {
+        VLOG_INFO("Not deleting VRF %s as interfaces are still enslaved to "
+                  "it, it is no longer maintained by OVN.", vrf_name);
+        return 0;
+    }
+
+    int error = re_nl_delete_vrf(vrf_name);
+    return error == ENODEV ? 0 : error;
+}
+
 void
 route_exchange_run(struct route_exchange_state *state,
                    const struct route_exchange_ctx_in *r_ctx_in,
@@ -677,8 +700,8 @@ route_exchange_run(struct route_exchange_state *state,
     const char *vrf_name;
     SSET_FOR_EACH_SAFE (vrf_name, &old_maintained_vrfs) {
         if (!sset_contains(&_maintained_vrfs, vrf_name)) {
-            error = re_nl_delete_vrf(vrf_name);
-            if (error && error != ENODEV) {
+            error = route_exchange_release_vrf(vrf_name);
+            if (error) {
                 /* If netlink transaction fails, we will retry next time. */
                 sset_add(&_maintained_vrfs, vrf_name);
                 SET_ROUTE_EXCHANGE_NL_STATUS(error);
@@ -700,7 +723,7 @@ route_exchange_cleanup_vrfs(void)
 
     const char *vrf_name;
     SSET_FOR_EACH (vrf_name, &_maintained_vrfs) {
-        re_nl_delete_vrf(vrf_name);
+        route_exchange_release_vrf(vrf_name);
     }
 }
 

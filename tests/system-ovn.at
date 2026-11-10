@@ -21671,6 +21671,10 @@ OVN_ROUTE_V6_EQUAL([ovnvrf$vrf], [dnl
 2001:db8:1003::151 via 2000:db8:1000::1 dev lo-test proto ovn metric 1000 pref medium
 fe80::/64 dev lo-test proto kernel metric 256 pref medium])
 
+# ovn-controller does not delete a VRF that still has interfaces enslaved
+# to it, release lo-test so that the VRF is removed on exit.
+check ip link set lo-test nomaster
+
 OVN_CLEANUP_CONTROLLER([hv1])
 
 # Ensure system resources are cleaned up.
@@ -21979,6 +21983,159 @@ OVN_CLEANUP_CONTROLLER([hv1], [], [], [lr-frr])
 check ovn-nbctl --wait=sb sync
 
 # Verify routes are removed in SB database.
+wait_row_count Learned_Route 0
+
+OVN_CLEANUP_NORTHD
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d
+/failed to query port patch-.*/d
+/.*terminating with signal 15.*/d"])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([dynamic-routing - learned routes after re-enabling logical router])
+
+# Mimics a tenant router that speaks BGP directly, with FRR running in the
+# tenant VRF (as in a multi-AZ setup without ovn-ic):
+# 1. Routes present in the VRF are learned (Learned_Route).
+# 2. Disabling the logical router removes the learned routes.  The VRF
+#    maintained by ovn-controller is not deleted as the fabric port is
+#    still enslaved to it, so the routes of the routing daemon are kept.
+# 3. Re-enabling the logical router adopts the VRF again and the routes
+#    still present in it are learned again.
+# 4. Once the VRF has no slaves anymore, disabling the router deletes it.
+#
+# No dynamic-routing-vrf-id is set, so the route table is the datapath
+# tunnel key.  The VRF is maintained by ovn-controller
+# (dynamic-routing-maintain-vrf=true).
+#
+# Topology:
+#   +------+    +--------+    +---------+
+#   | sw-t |----| lr-t   |----| fabric  | (localnet -> br-ex)
+#   +------+    +--------+    +----+----+
+#                                  |
+#                              fab-t1 (internal port on br-ex, in vrf-t1)
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-ex])
+
+check ovs-ofctl add-flow br-ex action=normal
+
+check ovs-vsctl \
+    -- set Open_vSwitch . external-ids:system-id=hv1 \
+    -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+    -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+    -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+    -- set Open_vSwitch . external-ids:ovn-bridge-mappings=phys:br-ex \
+    -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+start_daemon ovn-controller
+
+vrf=vrf-t1
+# Older iproute2 versions print "proto 84" instead of "proto ovn".
+vrf_routes() {
+    ip route list vrf $vrf | sed 's/proto 84/proto ovn/'
+}
+
+check ovn-nbctl ls-add fabric
+check ovn-nbctl lsp-add-localnet-port fabric fabric-ln phys
+
+check ovn-nbctl lr-add lr-t \
+    -- set Logical_Router lr-t \
+        options:dynamic-routing=true \
+        options:dynamic-routing-redistribute=connected \
+        options:dynamic-routing-vrf-name=$vrf
+
+check ovn-nbctl ls-add sw-t
+check ovn-nbctl lrp-add lr-t lr-t-sw 00:00:00:01:00:01 10.1.1.1/24
+check ovn-nbctl lsp-add-router-port sw-t sw-t-lr lr-t-sw
+
+check ovn-nbctl lrp-add lr-t lr-t-fabric 00:00:00:01:00:03 169.254.100.11/24
+check ovn-nbctl set logical_router_port lr-t-fabric options:dynamic-routing-maintain-vrf=true
+check ovn-nbctl lsp-add-router-port fabric fabric-lr-t lr-t-fabric
+check ovn-nbctl lrp-set-gateway-chassis lr-t-fabric hv1
+
+check ovn-nbctl --wait=hv sync
+
+# The VRF is created by ovn-controller (maintain-vrf=true) and uses the
+# datapath tunnel key as table.
+table=$(fetch_column Datapath_Binding tunnel_key external_ids:name=lr-t)
+on_exit "ip link del $vrf"
+OVS_WAIT_UNTIL([ip -d link show $vrf | grep -q "vrf table $table"])
+
+# FRR side: internal port on br-ex enslaved to the VRF.
+check ovs-vsctl add-port br-ex fab-t1 -- set Interface fab-t1 type=internal
+check ip link set fab-t1 address 00:00:00:01:00:64
+check ip link set fab-t1 master $vrf
+check ip addr add 169.254.100.111/24 dev fab-t1
+check ip link set fab-t1 up
+
+check ovn-nbctl --wait=hv sync
+check_row_count Port_Binding 1 logical_port=cr-lr-t-fabric 'options:dynamic-routing=true'
+
+# Simulate BGP learning routes via the fabric.
+check ip route add 10.2.1.0/24 via 169.254.100.21 vrf $vrf proto zebra
+check ip route add 10.3.1.0/24 via 169.254.100.31 vrf $vrf proto zebra
+
+AS_BOX([$(date +%H:%M:%S.%03N) Wait for advertised and learned routes])
+wait_row_count Advertised_Route 1 ip_prefix=10.1.1.0/24
+wait_row_count Learned_Route 1 ip_prefix=10.2.1.0/24 nexthop=169.254.100.21
+wait_row_count Learned_Route 1 ip_prefix=10.3.1.0/24 nexthop=169.254.100.31
+check_row_count Learned_Route 2
+OVS_WAIT_UNTIL([vrf_routes | grep -q "^blackhole 10.1.1.0/24 proto ovn"])
+AT_CHECK([vrf_routes | grep -c "proto zebra"], [0], [dnl
+2
+])
+
+AS_BOX([$(date +%H:%M:%S.%03N) Disable logical router])
+check ovn-nbctl --wait=hv set Logical_Router lr-t enabled=false
+check_row_count Datapath_Binding 0 external_ids:name=lr-t
+wait_row_count Learned_Route 0
+wait_row_count Advertised_Route 0
+# fab-t1 is still enslaved to the VRF, so ovn-controller only disowns it:
+# the OVN routes are removed, fab-t1 and the "BGP" routes are kept.
+OVS_WAIT_UNTIL([grep -q "Not deleting VRF $vrf as interfaces are still enslaved" ovn-controller.log])
+OVS_WAIT_WHILE([vrf_routes | grep -q "proto ovn"])
+AT_CHECK([ip -d link show $vrf | grep -q "vrf table $table"])
+AT_CHECK([ip -d link show fab-t1 | grep -q "master $vrf"])
+AT_CHECK([vrf_routes | grep -c "proto zebra"], [0], [dnl
+2
+])
+
+AS_BOX([$(date +%H:%M:%S.%03N) Re-enable logical router])
+check ovn-nbctl --wait=hv set Logical_Router lr-t enabled=true
+wait_row_count Port_Binding 1 logical_port=cr-lr-t-fabric 'options:dynamic-routing=true'
+
+# The VRF still points at the original table, so the router must come back
+# with the same tunnel key.
+AT_CHECK_UNQUOTED([fetch_column Datapath_Binding tunnel_key external_ids:name=lr-t], [0], [dnl
+$table
+])
+
+# The VRF is adopted again and the routes still present in it are learned
+# again, without touching it.
+wait_row_count Advertised_Route 1 ip_prefix=10.1.1.0/24
+wait_row_count Learned_Route 1 ip_prefix=10.2.1.0/24 nexthop=169.254.100.21
+wait_row_count Learned_Route 1 ip_prefix=10.3.1.0/24 nexthop=169.254.100.31
+check_row_count Learned_Route 2
+OVS_WAIT_UNTIL([vrf_routes | grep -q "^blackhole 10.1.1.0/24 proto ovn"])
+AT_CHECK([vrf_routes | grep -c "proto zebra"], [0], [dnl
+2
+])
+
+AS_BOX([$(date +%H:%M:%S.%03N) Disable logical router without VRF slaves])
+# Without slaves the VRF is deleted again when it is no longer needed.
+check ip link set fab-t1 nomaster
+check ovn-nbctl --wait=hv set Logical_Router lr-t enabled=false
+wait_row_count Learned_Route 0
+OVS_WAIT_WHILE([ip link show $vrf])
+
+OVN_CLEANUP_CONTROLLER([hv1])
+check ovn-nbctl --wait=sb sync
 wait_row_count Learned_Route 0
 
 OVN_CLEANUP_NORTHD

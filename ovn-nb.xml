@@ -4966,6 +4966,16 @@ or
         </p>
 
         <p>
+          When the vrf is no longer needed on a chassis, e.g. because the
+          <ref table="Logical_Router"/> is deleted or disabled, the
+          ovn-controller removes it, unless some interface is still enslaved
+          to it (e.g. the interface a routing daemon uses for peering).  Such
+          a vrf is left in place, together with the interfaces and the routes
+          not installed by OVN, and is no longer maintained by OVN.  It is
+          maintained again if it is needed later on.
+        </p>
+
+        <p>
           If the setting is not set or false the ovn-controller will expect
           this VRF to already exist. Some tooling outside of OVN needs to
           ensure this.
