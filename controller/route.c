@@ -613,6 +613,7 @@ advertise_datapath_cleanup(struct advertise_datapath_entry *ad)
     }
     hmap_destroy(&ad->routes);
     smap_destroy(&ad->bound_ports);
+    sset_destroy(&ad->port_name_ports);
     free(ad);
 }
 
@@ -624,6 +625,7 @@ advertised_datapath_alloc(const struct sbrec_datapath_binding *datapath)
         .db = datapath,
         .routes = HMAP_INITIALIZER(&ad->routes),
         .bound_ports = SMAP_INITIALIZER(&ad->bound_ports),
+        .port_name_ports = SSET_INITIALIZER(&ad->port_name_ports),
     };
 
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 10);
@@ -704,6 +706,10 @@ route_run(struct route_ctx_in *r_ctx_in,
             } else {
                 snprintf(ad->vrf_name, sizeof ad->vrf_name, "ovnvrf%"PRIu32,
                          route_get_table_id(ad->db));
+            }
+
+            if (port_name) {
+                sset_add(&ad->port_name_ports, local_peer->logical_port);
             }
 
             lr_has_port_name_filter |= route_add_bound_port(
@@ -799,6 +805,15 @@ route_run(struct route_ctx_in *r_ctx_in,
         }
         sset_add(r_ctx_out->tracked_ports_local,
                  route->logical_port->logical_port);
+
+        /* If any locally relevant port of this datapath has
+         * dynamic-routing-port-name configured, only those ports advertise
+         * routes. */
+        if (!sset_is_empty(&ad->port_name_ports) &&
+            !sset_contains(&ad->port_name_ports,
+                           route->logical_port->logical_port)) {
+            continue;
+        }
 
         bool distributed_lb = route_is_distributed_lb(route);
 

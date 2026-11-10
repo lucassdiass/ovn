@@ -22965,10 +22965,11 @@ AT_CLEANUP
 OVN_FOR_EACH_NORTHD([
 AT_SETUP([dynamic-routing - BGP learned routes with router filter name and multiple DGPs])
 
-# This test validates that BGP learned routes work correctly:
+# This test validates that BGP learned and advertised routes work correctly:
 # 1. Routes added to the VRF appear in Learned_Route table
 # 2. Remove routes learned in LRPs in same hypervisor when configure dynamic-routing-port-name
 # 3. Keep learned route just in LRP with dynamic-routing-port-name configured.
+# 4. Only advertise routes of the LRP with dynamic-routing-port-name configured.
 #
 # Topology:
 #    +---------+
@@ -23060,10 +23061,18 @@ check_row_count Port_Binding 1 logical_port=cr-lrp-dgp-dummy 'options:dynamic-ro
 
 # Add static routes.
 check ovn-nbctl lr-route-add lr-frr 10.10.2.1 20.0.0.42 lrp-local-bgp-port
+check ovn-nbctl lr-route-add lr-frr 10.10.4.1 20.0.1.42 lrp-dgp-dummy
 
 # Verify advertised routes exist.
 AS_BOX([Advertised_Route])
 wait_row_count Advertised_Route 1 ip_prefix=10.10.2.1
+wait_row_count Advertised_Route 1 ip_prefix=10.10.4.1
+
+# Without dynamic-routing-port-name both DGPs advertise their routes.
+OVN_ROUTE_EQUAL([vrf-$vrf], [dnl
+blackhole 10.10.2.1 proto ovn metric 1000
+blackhole 10.10.4.1 proto ovn metric 1000
+20.0.0.0/24 dev local-bgp-port proto kernel scope link src 20.0.0.3])
 
 # Add a route to the VRF (simulating BGP learning a route).
 check ip route add 10.10.3.1 via 20.0.0.25 vrf vrf-$vrf proto zebra
@@ -23076,6 +23085,21 @@ lp=$(fetch_column port_binding _uuid logical_port=lrp-local-bgp-port)
 
 check_row_count Learned_Route 1 ip_prefix=10.10.3.1
 check_row_count Learned_Route 1 ip_prefix=10.10.3.1 logical_port=$lp
+
+# Only the DGP with dynamic-routing-port-name advertises its routes.
+OVN_ROUTE_EQUAL([vrf-$vrf], [dnl
+blackhole 10.10.2.1 proto ovn metric 1000
+10.10.3.1 via 20.0.0.25 dev local-bgp-port proto zebra
+20.0.0.0/24 dev local-bgp-port proto kernel scope link src 20.0.0.3])
+
+# Removing the option makes both DGPs advertise again.
+check ovn-nbctl --wait=hv remove Logical_Router_Port lrp-local-bgp-port \
+    options dynamic-routing-port-name
+OVN_ROUTE_EQUAL([vrf-$vrf], [dnl
+blackhole 10.10.2.1 proto ovn metric 1000
+10.10.3.1 via 20.0.0.25 dev local-bgp-port proto zebra
+blackhole 10.10.4.1 proto ovn metric 1000
+20.0.0.0/24 dev local-bgp-port proto kernel scope link src 20.0.0.3])
 
 check ovn-nbctl --wait=hv ls-del ls-dummy
 check ovn-nbctl --wait=hv ls-del public

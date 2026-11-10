@@ -89,6 +89,13 @@ struct advertise_datapath_entry {
      * such referenced port is local. In this case we should only advertise
      * routes but not learn them. */
     struct smap bound_ports;
+
+    /* The names of the locally relevant ports of this datapath that have
+     * dynamic-routing-port-name configured.  If not empty, only routes whose
+     * advertising port is in this set are advertised, so that ports without
+     * dynamic-routing-port-name don't advertise routes on a chassis where a
+     * port with that option is also present. */
+    struct sset port_name_ports;
 };
 
 struct advertise_route_entry {

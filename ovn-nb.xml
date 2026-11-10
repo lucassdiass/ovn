@@ -5007,6 +5007,12 @@ or
         If a match is found in there the configured interface name is used
         instead of the autodiscovery. Also it is then irrelevant if the port
         is bound locally.
+
+        This option also affects route advertisement: if multiple LRPs of the
+        same Logical_Router are relevant on a chassis (e.g. multiple
+        distributed gateway ports scheduled on the same chassis) and at least
+        one of them has this option set, only the routes of the LRPs with
+        this option set are advertised by that chassis.
       </column>
       <column name="options" key="ic-route-filter-adv">
          <p>
