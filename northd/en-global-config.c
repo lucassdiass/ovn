@@ -681,6 +681,11 @@ check_nb_options_out_of_sync(
     }
 
     if (config_out_of_sync(&nb->options, &config_data->nb_options,
+                           "generate_lrp_lla", false)) {
+        return true;
+    }
+
+    if (config_out_of_sync(&nb->options, &config_data->nb_options,
                            "install_ls_lb_from_router", false)) {
         return true;
     }

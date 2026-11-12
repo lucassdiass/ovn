@@ -22,6 +22,9 @@ Post v26.09.0
      instead of being ignored.  Such ports are useful to connect a transit
      router to a transit switch.  Accordingly, "ovn-ic-nbctl trp-add" no
      longer requires a trailing network or chassis argument.
+   - Added "generate_lrp_lla" option to NB_Global.  When set to false,
+     ovn-northd no longer adds an automatically generated EUI-64 IPv6 link
+     local address to the networks of logical router ports.
    - Dynamic Routing:
      * Remove the "other_config:dynamic-routing-arp-prefer-local"
        option from Logical Switches.  EVPN-learned MAC bindings are

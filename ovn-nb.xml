@@ -400,6 +400,28 @@
         of HWOL compatibility with GDP.
       </column>
 
+      <column name="options" key="generate_lrp_lla"
+              type='{"type": "boolean"}'>
+        <p>
+          Default value is <code>true</code>.  By default,
+          <code>ovn-northd</code> automatically adds an IPv6 link local
+          address, derived from the port's <ref table="Logical_Router_Port"
+          column="mac"/> using the EUI-64 format, to the networks of every
+          <ref table="Logical_Router_Port"/>.  If set to <code>false</code>,
+          this address is not generated and only the addresses configured in
+          the <ref table="Logical_Router_Port" column="networks"/> column are
+          used.  The router port will then neither reply to Neighbor
+          Solicitations for the generated address nor use it as a nexthop.
+        </p>
+
+        <p>
+          IPv6 Router Advertisements require a link local source address.  If
+          this option is <code>false</code>, they are only sent by router
+          ports that have a link local address explicitly configured in
+          <ref table="Logical_Router_Port" column="networks"/>.
+        </p>
+      </column>
+
       <column name="options" key="northd-backoff-interval-ms">
         Maximum interval that the northd incremental engine is delayed by
         in milliseconds. Setting the value to nonzero delays the next northd

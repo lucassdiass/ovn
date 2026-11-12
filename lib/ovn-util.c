@@ -347,6 +347,17 @@ bool
 extract_lrp_networks(const struct nbrec_logical_router_port *lrp,
                      struct lport_addresses *laddrs)
 {
+    return extract_lrp_networks__(lrp, laddrs, true);
+}
+
+/* Same as extract_lrp_networks(), but the EUI-64 based IPv6 link local
+ * address is only added to the 'ipv6_addrs' field of 'laddrs' if
+ * 'add_lla' is true.  When added, it is always the last entry of
+ * 'ipv6_addrs'. */
+bool
+extract_lrp_networks__(const struct nbrec_logical_router_port *lrp,
+                       struct lport_addresses *laddrs, bool add_lla)
+{
     memset(laddrs, 0, sizeof *laddrs);
 
     if (!eth_addr_from_string(lrp->mac, &laddrs->ea)) {
@@ -386,17 +397,18 @@ extract_lrp_networks(const struct nbrec_logical_router_port *lrp,
         }
     }
 
-    /* Always add the IPv6 link local address. */
-    struct in6_addr lla;
-    in6_generate_lla(laddrs->ea, &lla);
-    add_ipv6_netaddr(laddrs, lla, 64);
+    if (add_lla) {
+        struct in6_addr lla;
+        in6_generate_lla(laddrs->ea, &lla);
+        add_ipv6_netaddr(laddrs, lla, 64);
+    }
 
     return true;
 }
 
 void
 lrp_network_to_string(const struct lport_addresses *addresses, struct ds *s,
-                      bool include_generated_v6)
+                      bool has_generated_v6)
 {
     ds_put_cstr(s, addresses->ea_s);
     for (size_t i = 0; i < addresses->n_ipv4_addrs; i++) {
@@ -404,9 +416,9 @@ lrp_network_to_string(const struct lport_addresses *addresses, struct ds *s,
         ds_put_format(s, " %s/%d", addr->addr_s, addr->plen);
     }
     for (size_t i = 0; i < addresses->n_ipv6_addrs; i++) {
-        /* The generated v6 address is always at the end
-         * (see extract_lrp_networks). */
-        if (!include_generated_v6 && i == addresses->n_ipv6_addrs -1) {
+        /* The generated v6 address, if any, is always at the end
+         * (see extract_lrp_networks__). */
+        if (has_generated_v6 && i == addresses->n_ipv6_addrs - 1) {
             break;
         }
         struct ipv6_netaddr *addr = &addresses->ipv6_addrs[i];

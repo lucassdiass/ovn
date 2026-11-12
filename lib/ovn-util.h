@@ -124,13 +124,12 @@ bool extract_ip_addresses(const char *address, struct lport_addresses *);
 bool extract_ip_address(const char *address, struct lport_addresses *);
 bool extract_lrp_networks(const struct nbrec_logical_router_port *,
                           struct lport_addresses *);
+bool extract_lrp_networks__(const struct nbrec_logical_router_port *,
+                            struct lport_addresses *, bool add_lla);
 void lrp_network_to_string(const struct lport_addresses *, struct ds *,
-                           bool include_generated_v6);
+                           bool has_generated_v6);
 bool extract_sbrec_binding_first_mac(const struct sbrec_port_binding *binding,
                                      struct eth_addr *ea);
-
-bool extract_lrp_networks__(char *mac, char **networks, size_t n_networks,
-                            struct lport_addresses *laddrs);
 
 bool lport_addresses_is_empty(const struct lport_addresses *);
 void init_lport_addresses(struct lport_addresses *);
