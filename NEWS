@@ -77,6 +77,10 @@ Post v26.09.0
      the replies from the backends of its load balancers.  The CMS must make
      sure that the replies re-enter the router on the chassis that load
      balanced the request.  See ovn-nb(5).
+   - The Logical_Router "options:dynamic_neigh_routers" option now also
+     applies to logical switch ports of type "remote" (e.g. ports on
+     OVN-IC transit switches), so no static ARP/ND mappings are created
+     for their addresses.
 
 OVN v26.09.0 - xxx xx xxxx
 --------------------------
