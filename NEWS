@@ -68,6 +68,7 @@ Post v26.09.0
      table at startup; it defers its kernel route updates until the initial
      dump of the advertised routes of the local route-exchange datapaths is
      complete.
+<<<<<<< HEAD
    - Documented the "replicated gateway" setup, in which several ovn-controller
      instances share one chassis name and one anycast encapsulation IP
      reachable over the underlay through ECMP, so that they appear to OVN as
@@ -77,6 +78,12 @@ Post v26.09.0
      the replies from the backends of its load balancers.  The CMS must make
      sure that the replies re-enter the router on the chassis that load
      balanced the request.  See ovn-nb(5).
+=======
+   - The Logical_Router "options:dynamic_neigh_routers" option now also
+     applies to logical switch ports of type "remote" (e.g. ports on
+     OVN-IC transit switches), so no static ARP/ND mappings are created
+     for their addresses.
+>>>>>>> 8f924f291 (northd: Honor dynamic_neigh_routers for remote ports.)
 
 OVN v26.09.0 - xxx xx xxxx
 --------------------------
