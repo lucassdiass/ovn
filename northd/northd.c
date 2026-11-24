@@ -2870,7 +2870,10 @@ ovn_port_update_sbrec(struct ovsdb_idl_txn *ovnsb_txn,
             goto common;
         }
 
-        if (!lsp_is_router(op->nbsp)) {
+        /* Remote ports marked with options:is_router are still bound to
+         * a remote chassis, so keep syncing them as remote ports instead of
+         * turning them into patch ports. */
+        if (!lsp_is_router(op->nbsp) || lsp_is_remote(op->nbsp)) {
             uint32_t queue_id = smap_get_int(
                     &op->sb->options, "qdisc_queue_id", 0);
             bool has_qos = port_has_qos_params(&op->nbsp->options);

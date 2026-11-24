@@ -1811,7 +1811,10 @@
           <code>remote</code> LSPs that back LRPs in another OVN
           interconnection zone.  Such ports are omitted from the
           <code>_MC_flood_l2</code> multicast group so IP multicast is not
-          flooded toward them.  Ignored unless <ref column="type"/> is
+          flooded toward them, and no static ARP/ND entries are created
+          for their addresses in the routers connected to the switch, so
+          they are resolved dynamically.  The port is still bound to its
+          remote chassis.  Ignored unless <ref column="type"/> is
           <code>remote</code>.  Default: <code>false</code>.
         </column>
       </group>

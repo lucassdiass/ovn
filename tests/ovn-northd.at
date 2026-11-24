@@ -9643,6 +9643,54 @@ OVN_CLEANUP_NORTHD
 AT_CLEANUP
 ])
 
+OVN_FOR_EACH_NORTHD_NO_HV([
+AT_SETUP([LSP type=remote options:is_router keeps the remote binding])
+ovn_start
+
+check ovn-sbctl chassis-add gw-az2 geneve 10.0.0.2 \
+    -- set chassis gw-az2 other_config:is-remote=true
+
+check ovn-nbctl lr-add lr0
+check ovn-nbctl lrp-add lr0 lr0-ts 00:00:00:00:11:03 169.254.11.3/24
+check ovn-nbctl ls-add ts
+check ovn-nbctl lsp-add-router-port ts ts-lr0 lr0-ts
+check ovn-nbctl lsp-add ts remote1 \
+    -- lsp-set-type remote1 remote \
+    -- lsp-set-addresses remote1 "00:00:00:00:11:02 169.254.11.2" \
+    -- lsp-set-options remote1 requested-chassis=gw-az2
+check ovn-nbctl --wait=sb sync
+
+gw_uuid=$(fetch_column Chassis _uuid name=gw-az2)
+check_column remote Port_Binding type logical_port=remote1
+check_column "$gw_uuid" Port_Binding chassis logical_port=remote1
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | \
+          grep -c 169.254.11.2], [0], [1
+])
+
+dnl Marking the port as a router port only drops the static ARP entry,
+dnl the port is still bound to the remote chassis.
+check ovn-nbctl --wait=sb set Logical_Switch_Port remote1 \
+    options:is_router=true
+check_column remote Port_Binding type logical_port=remote1
+check_column "$gw_uuid" Port_Binding chassis logical_port=remote1
+AT_CHECK([ovn-sbctl get Port_Binding remote1 options:requested-chassis], [0], [dnl
+gw-az2
+])
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | \
+          grep -c 169.254.11.2], [1], [0
+])
+
+check ovn-nbctl --wait=sb remove Logical_Switch_Port remote1 options is_router
+check_column remote Port_Binding type logical_port=remote1
+check_column "$gw_uuid" Port_Binding chassis logical_port=remote1
+AT_CHECK([ovn-sbctl lflow-list lr0 | grep lr_in_arp_resolve | \
+          grep -c 169.254.11.2], [0], [1
+])
+
+OVN_CLEANUP_NORTHD
+AT_CLEANUP
+])
+
 OVN_FOR_EACH_NORTHD_NO_HV_PARALLELIZATION([
 AT_SETUP([ACLs after lb])
 AT_KEYWORDS([acl])
