@@ -273,6 +273,39 @@ sync_local_port(struct ic_context *ctx,
     sync_lsp_tnl_key(lsp, isb_pb->tunnel_key);
 }
 
+/* Returns true if ovn-ic should mark the remote ports of transit switches
+ * that represent router ports in other AZs with options:is_router=true. */
+static bool
+remote_lrp_is_router_enabled(const struct nbrec_nb_global *nb_global)
+{
+    return nb_global && smap_get_bool(&nb_global->options,
+                                      "ic-remote-lrp-is-router", false);
+}
+
+/* Sets options:is_router on remote port 'lsp' if 'is_router' is true and
+ * removes it otherwise. */
+static void
+sync_remote_lsp_is_router(const struct nbrec_logical_switch_port *lsp,
+                          bool is_router)
+{
+    if (is_router) {
+        if (!smap_get_bool(&lsp->options, "is_router", false)) {
+            nbrec_logical_switch_port_update_options_setkey(
+                lsp, "is_router", "true");
+        }
+    } else if (smap_get(&lsp->options, "is_router")) {
+        nbrec_logical_switch_port_update_options_delkey(lsp, "is_router");
+    }
+}
+
+/* Returns true if IC-SB port binding 'isb_pb' of a transit switch represents
+ * a logical router port, i.e., the AZ that owns it found its router. */
+static bool
+isb_pb_is_router_port(const struct icsbrec_port_binding *isb_pb)
+{
+    return smap_get(&isb_pb->external_ids, "router-id") != NULL;
+}
+
 static void
 sync_tsp_router_peer(const struct icnbrec_transit_switch_port *tsp,
                      const struct nbrec_logical_switch_port *lsp)
@@ -350,17 +383,22 @@ sync_tsp_local(const struct icnbrec_transit_switch_port *tsp,
         nbrec_logical_switch_port_set_type(lsp, tsp->type);
     }
     sync_tsp_common(tsp, isb_pb, lsp);
+    /* The port may have been remote before. */
+    sync_remote_lsp_is_router(lsp, false);
 }
 
 static void
 sync_tsp_remote(const struct icnbrec_transit_switch_port *tsp,
                 const struct icsbrec_port_binding *isb_pb,
-                const struct nbrec_logical_switch_port *lsp)
+                const struct nbrec_logical_switch_port *lsp,
+                bool remote_lrp_is_router)
 {
     if (strcmp(lsp->type, "remote")) {
         nbrec_logical_switch_port_set_type(lsp, "remote");
     }
     sync_tsp_common(tsp, isb_pb, lsp);
+    sync_remote_lsp_is_router(
+        lsp, remote_lrp_is_router && !strcmp(tsp->type, "router"));
 }
 
 /* For each remote port:
@@ -371,8 +409,12 @@ static void
 sync_remote_port(struct ic_context *ctx,
                  const struct icsbrec_port_binding *isb_pb,
                  const struct nbrec_logical_switch_port *lsp,
-                 const struct sbrec_port_binding *sb_pb)
+                 const struct sbrec_port_binding *sb_pb,
+                 bool remote_lrp_is_router)
 {
+    sync_remote_lsp_is_router(
+        lsp, remote_lrp_is_router && isb_pb_is_router_port(isb_pb));
+
     /* Sync address from ISB to NB */
     if (isb_pb->address[0]) {
         if (lsp->n_addresses != 1 ||
@@ -463,7 +505,8 @@ sync_router_port(const struct icsbrec_port_binding *isb_pb,
 static void
 create_nb_lsp(struct ic_context *ctx,
               const struct icsbrec_port_binding *isb_pb,
-              const struct nbrec_logical_switch *ls)
+              const struct nbrec_logical_switch *ls,
+              bool remote_lrp_is_router)
 {
     /* The NB Logical_Switch_Port name is unique across the whole NB, but a
      * remote AZ may bind a port whose name is already used here, e.g. by a
@@ -497,6 +540,8 @@ create_nb_lsp(struct ic_context *ctx,
             lsp, (const char **)&isb_pb->address, 1);
     }
     sync_lsp_tnl_key(lsp, isb_pb->tunnel_key);
+    sync_remote_lsp_is_router(
+        lsp, remote_lrp_is_router && isb_pb_is_router_port(isb_pb));
     nbrec_logical_switch_update_ports_addvalue(ls, lsp);
 }
 
@@ -723,6 +768,8 @@ port_binding_sync_ts(struct ic_context *ctx,
         return;
     }
 
+    bool remote_lrp_is_router = remote_lrp_is_router_enabled(
+        nbrec_nb_global_first(ctx->ovnnb_idl));
     struct shash nb_ports = SHASH_INITIALIZER(&nb_ports);
     struct shash old_nb_ports = SHASH_INITIALIZER(&old_nb_ports);
     struct shash local_pbs = SHASH_INITIALIZER(&local_pbs);
@@ -806,7 +853,7 @@ port_binding_sync_ts(struct ic_context *ctx,
         if (!tsp->chassis[0] || !chassis_is_remote(ctx, tsp->chassis)) {
             sync_tsp_local(tsp, isb_pb, lsp);
         } else {
-            sync_tsp_remote(tsp, isb_pb, lsp);
+            sync_tsp_remote(tsp, isb_pb, lsp, remote_lrp_is_router);
         }
     }
 
@@ -855,7 +902,8 @@ port_binding_sync_ts(struct ic_context *ctx,
                 if (!sb_pb) {
                     continue;
                 }
-                sync_remote_port(ctx, isb_pb, lsp, sb_pb);
+                sync_remote_port(ctx, isb_pb, lsp, sb_pb,
+                                 remote_lrp_is_router);
             }
         } else {
             VLOG_DBG("Ignore lsp %s on ts %s with type %s.",
@@ -875,7 +923,7 @@ port_binding_sync_ts(struct ic_context *ctx,
 
     /* Create lsp in NB for remote ports */
     SHASH_FOR_EACH (node, &remote_pbs) {
-        create_nb_lsp(ctx, node->data, ls);
+        create_nb_lsp(ctx, node->data, ls, remote_lrp_is_router);
     }
 
     ovn_destroy_tnlids(&pb_tnlids);
@@ -1239,11 +1287,15 @@ port_binding_sb_name_ts_map_destroy(struct shash *map)
 struct ed_type_port_binding {
     struct sset synced_ts;
     struct sset synced_tr;
+    /* Value of NB_Global options:ic-remote-lrp-is-router used by the last
+     * full sync. */
+    bool remote_lrp_is_router;
 };
 
 enum engine_node_state
-en_port_binding_run(struct engine_node *node, void *data OVS_UNUSED)
+en_port_binding_run(struct engine_node *node, void *data_)
 {
+    struct ed_type_port_binding *data = data_;
     const struct engine_context *eng_ctx = engine_get_context();
     struct ic_context *ctx = eng_ctx->client_ctx;
     const struct ed_type_az *az = engine_get_input_data("az", node);
@@ -1254,6 +1306,8 @@ en_port_binding_run(struct engine_node *node, void *data OVS_UNUSED)
         return EN_UNCHANGED;
     }
 
+    data->remote_lrp_is_router = remote_lrp_is_router_enabled(
+        nbrec_nb_global_first(ctx->ovnnb_idl));
     port_binding_run(ctx, az->runned_az);
 
     return EN_UPDATED;
@@ -1743,6 +1797,23 @@ port_binding_sb_chassis_handler(struct engine_node *node,
                                         SBREC_CHASSIS_COL_OTHER_CONFIG)) {
             return EN_UNHANDLED;
         }
+    }
+    return EN_HANDLED_UNCHANGED;
+}
+
+/* NB_Global: only options:ic-remote-lrp-is-router is read by the sync and
+ * it affects the remote ports of every transit switch, so recompute when it
+ * changes. */
+enum engine_input_handler_result
+port_binding_nb_nb_global_handler(struct engine_node *node, void *data_)
+{
+    struct ed_type_port_binding *data = data_;
+    const struct nbrec_nb_global_table *tbl =
+        EN_OVSDB_GET(engine_get_input("NB_nb_global", node));
+
+    if (remote_lrp_is_router_enabled(nbrec_nb_global_table_first(tbl))
+        != data->remote_lrp_is_router) {
+        return EN_UNHANDLED;
     }
     return EN_HANDLED_UNCHANGED;
 }

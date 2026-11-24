@@ -49,5 +49,7 @@ enum engine_input_handler_result
 port_binding_sb_port_binding_handler(struct engine_node *node, void *data);
 enum engine_input_handler_result
 port_binding_sb_chassis_handler(struct engine_node *node, void *data);
+enum engine_input_handler_result
+port_binding_nb_nb_global_handler(struct engine_node *node, void *data);
 
 #endif /* EN_IC_PORT_BINDING_H */

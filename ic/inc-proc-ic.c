@@ -314,6 +314,8 @@ void inc_proc_ic_init(struct ovsdb_idl_loop *nb,
      * updates. */
     engine_add_input(&en_port_binding, &en_sb_chassis,
                      port_binding_sb_chassis_handler);
+    engine_add_input(&en_port_binding, &en_nb_nb_global,
+                     port_binding_nb_nb_global_handler);
 
     /* en_route: advertise/learn cross-AZ routes.
      *

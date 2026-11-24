@@ -583,6 +583,30 @@
         </column>
       </group>
 
+      <group title="Options for interconnection transit switch ports">
+        <column name="options" key="ic-remote-lrp-is-router"
+                type='{"type": "boolean"}'>
+          <p>
+            If set to <code>true</code>, <code>ovn-ic</code> sets
+            <ref table="Logical_Switch_Port" column="options"
+            key="is_router"/> to <code>true</code> on the
+            <code>remote</code> ports it creates on transit switches for
+            logical router ports of other availability zones, so they are
+            handled like router ports, e.g., they are not part of the
+            <code>_MC_flood_l2</code> multicast group and no static ARP/ND
+            entries are created for their addresses.  Remote ports that do
+            not represent a logical router port are not affected.
+            Default is <code>false</code>.
+          </p>
+
+          <p>
+            <code>ovn-ic</code> owns the <code>is_router</code> option of
+            the <code>remote</code> ports it creates: when this option is
+            <code>false</code> it removes <code>is_router</code> from them.
+          </p>
+        </column>
+      </group>
+
       <group title="Options for interconnection address_set advertisement">
         <p>
           These options control whether address_sets propagate from one OVN

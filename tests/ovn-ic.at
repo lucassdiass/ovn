@@ -327,6 +327,107 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-ic -- remote router ports is_router option])
+
+ovn_init_ic_db
+net_add n1
+
+# 1 GW per AZ
+for i in 1 2; do
+    az=az$i
+    ovn_start $az
+    sim_add gw-$az
+    as gw-$az
+    check ovs-vsctl add-br br-phys
+    ovn_az_attach $az n1 br-phys 192.168.1.$i
+    check ovs-vsctl set open . external-ids:ovn-is-interconn=true
+done
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb ts-add ts1
+check ovn-nbctl lr-add lr1
+
+dnl Router port connected the legacy way.
+check ovn-nbctl lrp-add lr1 lrp1 00:00:00:00:00:01 10.0.0.1/24
+check ovn-nbctl lrp-set-gateway-chassis lrp1 gw-az1
+check ovn-nbctl lsp-add-router-port ts1 lsp1 lrp1
+
+dnl Router and non-router transit switch ports.
+check ovn-nbctl lrp-add lr1 lrp2 00:00:00:00:00:02 10.0.0.2/24
+check ovn-ic-nbctl tsp-add ts1 tsp1 type=router chassis=gw-az1 peer=lrp2
+check ovn-ic-nbctl tsp-set-addr tsp1 "00:00:00:00:00:02 10.0.0.2/24"
+check ovn-ic-nbctl tsp-add ts1 tsp2 chassis=gw-az1
+check ovn-ic-nbctl tsp-set-addr tsp2 "00:00:00:00:00:03 10.0.0.3/24"
+check ovn-ic-nbctl --wait=sb sync
+
+ovn_as az2
+wait_column "remote" nb:Logical_Switch_Port type name=lsp1
+wait_column "remote" nb:Logical_Switch_Port type name=tsp1
+wait_column "remote" nb:Logical_Switch_Port type name=tsp2
+
+check_is_router() {
+    for port in lsp1 tsp1 tsp2; do
+        echo $port $(ovn-nbctl --if-exists get Logical_Switch_Port $port \
+                     options:is_router)
+    done
+}
+
+dnl Remote ports aren't marked by default.
+AT_CHECK([check_is_router], [0], [dnl
+lsp1
+tsp1
+tsp2
+])
+
+dnl Only the remote router ports are marked when the option is set.
+check ovn-nbctl set NB_Global . options:ic-remote-lrp-is-router=true
+OVS_WAIT_UNTIL([test "$(check_is_router)" = 'lsp1 "true"
+tsp1 "true"
+tsp2'])
+
+dnl The remote ports are still bound to the remote chassis.
+check ovn-nbctl --wait=sb sync
+gw_az1=$(fetch_column Chassis _uuid name=gw-az1)
+for port in lsp1 tsp1; do
+    check_column remote Port_Binding type logical_port=$port
+    check_column "$gw_az1" Port_Binding chassis logical_port=$port
+done
+
+dnl ovn-ic restores the option if it is removed.
+check ovn-nbctl remove Logical_Switch_Port lsp1 options is_router
+OVS_WAIT_UNTIL([test "$(check_is_router)" = 'lsp1 "true"
+tsp1 "true"
+tsp2'])
+
+dnl A new remote router port is marked when it is created.
+ovn_as az1
+check ovn-nbctl lrp-add lr1 lrp3 00:00:00:00:00:04 10.0.0.4/24
+check ovn-nbctl lrp-set-gateway-chassis lrp3 gw-az1
+check ovn-nbctl lsp-add-router-port ts1 lsp3 lrp3
+check ovn-ic-nbctl --wait=sb sync
+ovn_as az2
+wait_row_count nb:Logical_Switch_Port 1 name=lsp3 options:is_router=true
+
+dnl Disabling the option removes the marks.
+check ovn-nbctl set NB_Global . options:ic-remote-lrp-is-router=false
+OVS_WAIT_UNTIL([test "$(check_is_router)" = 'lsp1
+tsp1
+tsp2'])
+wait_row_count nb:Logical_Switch_Port 0 name=lsp3 options:is_router=true
+
+ovn_as az1
+check ovn-ic-nbctl --wait=sb ts-del ts1
+for i in 1 2; do
+    az=az$i
+    ovn_as $az
+    OVN_CLEANUP_SBOX(gw-$az)
+    OVN_CLEANUP_AZ([$az])
+done
+OVN_CLEANUP_IC
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
 AT_SETUP([ovn-ic -- transit switch port type and address updates])
 
 ovn_init_ic_db

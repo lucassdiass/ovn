@@ -84,6 +84,10 @@ Post v26.09.0
      egress table, after port security.  Packets dropped by ingress port
      security are now mirrored, while packets dropped by egress port
      security are not mirrored anymore.
+   - Added a new NB_Global "options:ic-remote-lrp-is-router" option.  When
+     set, ovn-ic marks the remote ports of transit switches that represent
+     logical router ports in other availability zones with
+     "options:is_router=true".
 
 OVN v26.09.0 - xxx xx xxxx
 --------------------------
