@@ -4610,3 +4610,174 @@ OVN_CLEANUP([hv2], [hv1
 /No encap type and\/or ip on chassis 'hv1'. Deleting chassis/d])
 AT_CLEANUP
 ])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-controller - I-P disable logical router with NAT and CoPP])
+AT_KEYWORDS([router-admin-state])
+ovn_start
+
+net_add n1
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+check ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+
+# Logical network:
+#   ls0 (10.0.0.0/24) -- lr0 -- pub (172.16.0.0/24, localnet)
+# lr0 has a distributed gateway port bound to hv1, SNAT and
+# dnat_and_snat rules and a CoPP attached.
+check ovn-nbctl ls-add ls0 \
+    -- lsp-add ls0 lsp0 \
+    -- lsp-set-addresses lsp0 "00:00:00:00:00:01 10.0.0.10"
+
+check ovn-nbctl ls-add pub \
+    -- lsp-add-localnet-port pub ln-pub phys
+
+check ovn-nbctl lr-add lr0 \
+    -- lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 10.0.0.1/24 \
+    -- lsp-add-router-port ls0 ls0-lr0 lr0-ls0 \
+    -- lrp-add lr0 lr0-pub 00:00:00:00:ff:02 172.16.0.1/24 \
+    -- lsp-add-router-port pub pub-lr0 lr0-pub \
+    -- lrp-set-gateway-chassis lr0-pub hv1
+
+check ovn-nbctl lr-nat-add lr0 snat 172.16.0.1 10.0.0.0/24
+check ovn-nbctl lr-nat-add lr0 dnat_and_snat 172.16.0.110 10.0.0.10
+
+check ovn-nbctl meter-add arp-meter drop 200 pktps 0
+check ovn-nbctl meter-add icmp4-meter drop 100 pktps 0
+check ovn-nbctl copp-add copp0 arp-resolve arp-meter
+check ovn-nbctl copp-add copp0 icmp4-error icmp4-meter
+check ovn-nbctl lr-copp-add copp0 lr0
+
+as hv1
+check ovs-vsctl -- add-port br-int vif0 -- \
+    set Interface vif0 external_ids:iface-id=lsp0
+wait_for_ports_up lsp0
+check ovn-nbctl --wait=hv sync
+
+lr0_key=$(fetch_column Datapath_Binding tunnel_key external_ids:name=lr0)
+lr0_meta=$(printf "0x%x" $lr0_key)
+
+# lr0 is a local datapath on hv1 and has NAT, CoPP meters programmed.
+OVS_WAIT_UNTIL([as hv1 ovs-ofctl dump-flows br-int > flows-lr0 &&
+                grep -q "metadata=$lr0_meta" flows-lr0])
+as hv1 ovs-ofctl dump-flows br-int > flows-lr0
+AT_CHECK([grep "metadata=$lr0_meta" flows-lr0 | grep -q "nat(src=172.16.0.110)"])
+AT_CHECK([grep "metadata=$lr0_meta" flows-lr0 | grep controller | grep -q meter_id=])
+CHECK_AFTER_RECOMPUTE([hv1], [hv1])
+
+# Disable lr0.  northd removes its Datapath_Binding (and its port
+# bindings, logical flows and multicast groups); on hv1 this is a local
+# datapath, which must be removed incrementally.
+check as hv1 ovn-appctl -t ovn-controller vlog/set inc_proc_eng:dbg
+log_start=$(($(wc -l < hv1/ovn-controller.log) + 1))
+check as hv1 ovn-appctl -t ovn-controller inc-engine/clear-stats
+check ovn-nbctl --wait=hv set Logical_Router lr0 enabled=false
+wait_row_count Datapath_Binding 0 external_ids:name=lr0
+
+as hv1 ovn-appctl -t ovn-controller inc-engine/show-stats > engine-stats-disable
+AT_CAPTURE_FILE([engine-stats-disable])
+tail -n +$log_start hv1/ovn-controller.log | \
+    grep -E "recompute \\(" > recompute-reasons-disable
+AT_CAPTURE_FILE([recompute-reasons-disable])
+
+check_controller_engine_stats hv1 runtime_data norecompute compute
+check_controller_engine_stats hv1 ct_zones norecompute compute
+check_controller_engine_stats hv1 lflow_output norecompute compute
+check_controller_engine_stats hv1 pflow_output norecompute compute
+
+AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | grep -c "metadata=$lr0_meta"], [1], [0
+])
+as hv1 ovn-appctl -t ovn-controller ct-zone-list > ct-zones-disable
+AT_CAPTURE_FILE([ct-zones-disable])
+AT_CHECK([as hv1 ovn-appctl -t ovn-controller ct-zone-list | grep -c "lr0"], [1], [0
+])
+
+# Re-enable lr0.
+log_start=$(($(wc -l < hv1/ovn-controller.log) + 1))
+check as hv1 ovn-appctl -t ovn-controller inc-engine/clear-stats
+check ovn-nbctl --wait=hv set Logical_Router lr0 enabled=true
+wait_row_count Datapath_Binding 1 external_ids:name=lr0
+lr0_key=$(fetch_column Datapath_Binding tunnel_key external_ids:name=lr0)
+lr0_meta=$(printf "0x%x" $lr0_key)
+
+as hv1 ovn-appctl -t ovn-controller inc-engine/show-stats > engine-stats-enable
+AT_CAPTURE_FILE([engine-stats-enable])
+tail -n +$log_start hv1/ovn-controller.log | \
+    grep -E "recompute \\(" > recompute-reasons-enable
+AT_CAPTURE_FILE([recompute-reasons-enable])
+
+OVS_WAIT_UNTIL([as hv1 ovs-ofctl dump-flows br-int > flows-lr0 &&
+                grep "metadata=$lr0_meta" flows-lr0 | grep -q "nat(src=172.16.0.110)"])
+CHECK_AFTER_RECOMPUTE([hv1], [hv1])
+
+# Disable lr0 again.  "pub" was only reachable through lr0, it is kept as
+# a local datapath until the next recompute.
+check ovn-nbctl --wait=hv set Logical_Router lr0 enabled=false
+wait_row_count Datapath_Binding 0 external_ids:name=lr0
+AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | grep -c "metadata=$lr0_meta"], [1], [0
+])
+CHECK_AFTER_RECOMPUTE([hv1], [hv1], [ln-pub], [pub])
+
+OVN_CLEANUP([hv1])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-controller - I-P delete logical switch with local VIF])
+AT_KEYWORDS([ovn])
+ovn_start
+
+net_add n1
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+
+check ovn-nbctl lr-add lr0 \
+    -- lrp-add lr0 lr0-ls0 00:00:00:00:ff:01 10.0.0.1/24 \
+    -- lrp-add lr0 lr0-ls1 00:00:00:00:ff:02 10.0.1.1/24 \
+    -- ls-add ls0 \
+    -- lsp-add-router-port ls0 ls0-lr0 lr0-ls0 \
+    -- lsp-add ls0 lsp0 \
+    -- lsp-set-addresses lsp0 "00:00:00:00:00:01 10.0.0.10" \
+    -- ls-add ls1 \
+    -- lsp-add-router-port ls1 ls1-lr0 lr0-ls1 \
+    -- lsp-add ls1 lsp1 \
+    -- lsp-set-addresses lsp1 "00:00:00:00:00:02 10.0.1.10"
+
+as hv1
+check ovs-vsctl \
+    -- add-port br-int vif0 -- set Interface vif0 external_ids:iface-id=lsp0 \
+    -- add-port br-int vif1 -- set Interface vif1 external_ids:iface-id=lsp1
+wait_for_ports_up
+check ovn-nbctl --wait=hv sync
+
+ls1_key=$(fetch_column Datapath_Binding tunnel_key external_ids:name=ls1)
+ls1_meta=$(printf "0x%x" $ls1_key)
+OVS_WAIT_UNTIL([as hv1 ovs-ofctl dump-flows br-int | grep -q "metadata=$ls1_meta"])
+CHECK_AFTER_RECOMPUTE([hv1], [hv1])
+
+# Delete ls1, its VIF lsp1 is still bound on hv1.
+check as hv1 ovn-appctl -t ovn-controller vlog/set inc_proc_eng:dbg
+log_start=$(($(wc -l < hv1/ovn-controller.log) + 1))
+check as hv1 ovn-appctl -t ovn-controller inc-engine/clear-stats
+check ovn-nbctl --wait=hv ls-del ls1
+wait_row_count Datapath_Binding 0 external_ids:name=ls1
+
+tail -n +$log_start hv1/ovn-controller.log | \
+    grep -E "recompute \\(" > recompute-reasons
+AT_CAPTURE_FILE([recompute-reasons])
+check_controller_engine_stats hv1 runtime_data norecompute compute
+check_controller_engine_stats hv1 lflow_output norecompute compute
+check_controller_engine_stats hv1 pflow_output norecompute compute
+
+AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | grep -c "metadata=$ls1_meta"], [1], [0
+])
+OVS_WAIT_UNTIL([test x$(as hv1 ovs-vsctl --if-exists get Interface vif1 external_ids:ovn-installed) = x])
+CHECK_AFTER_RECOMPUTE([hv1], [hv1])
+
+OVN_CLEANUP([hv1])
+AT_CLEANUP
+])

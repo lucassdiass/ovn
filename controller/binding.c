@@ -2949,6 +2949,12 @@ handle_deleted_lport(const struct sbrec_port_binding *pb,
      */
     remove_related_lport(pb, b_ctx_out);
 
+    /* The local datapath might have been removed already, if the datapath
+     * got deleted together with the port. */
+    if (if_status_is_port_claimed(b_ctx_out->if_mgr, pb->logical_port)) {
+        if_status_mgr_release_iface(b_ctx_out->if_mgr, pb);
+    }
+
     /* If the binding is not local, if 'pb' is a L3 gateway port, we should
      * remove its peer, if that one is local.
      */
@@ -3420,7 +3426,15 @@ binding_handle_port_binding_changes(struct binding_ctx_in *b_ctx_in,
     }
 
     SHASH_FOR_EACH_SAFE (node, &deleted_other_pbs) {
-        handle_deleted_lport(node->data, b_ctx_in, b_ctx_out);
+        const struct sbrec_port_binding *del_pb = node->data;
+        /* Non-VIF lports bound to this chassis are added to local_lports
+         * so that ct zones are allocated for them.  Remove them, unless an
+         * OVS interface uses the same iface-id. */
+        if (!local_binding_find(&b_ctx_out->lbinding_data->bindings,
+                                del_pb->logical_port)) {
+            remove_local_lports(del_pb->logical_port, b_ctx_out);
+        }
+        handle_deleted_lport(del_pb, b_ctx_in, b_ctx_out);
         shash_delete(&deleted_other_pbs, node);
     }
 

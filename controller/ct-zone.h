@@ -82,6 +82,8 @@ void ct_zones_pending_clear_commited(struct shash *pending);
 bool ct_zone_handle_dp_update(struct ct_zone_ctx *ctx,
                               const struct local_datapath *local_dp,
                               const struct shash *local_lports);
+bool ct_zone_handle_dp_removed(struct ct_zone_ctx *ctx,
+                               const struct sbrec_datapath_binding *dp);
 bool ct_zone_handle_port_update(struct ct_zone_ctx *ctx,
                                 const struct sbrec_port_binding *pb,
                                 bool updated, int *scan_start,

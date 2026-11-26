@@ -92,6 +92,9 @@ void add_local_datapath(
 
 void local_datapaths_destroy(struct hmap *local_datapaths);
 void local_datapath_destroy(struct local_datapath *ld);
+void remove_local_datapath(struct hmap *local_datapaths,
+                           struct local_datapath *ld,
+                           struct hmap *tracked_datapaths);
 void add_local_datapath_peer_port(
     const struct sbrec_port_binding *pb,
     const struct sbrec_port_binding *peer,

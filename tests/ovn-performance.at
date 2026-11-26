@@ -656,7 +656,7 @@ OVN_CONTROLLER_EXPECT_NO_HIT(
     [ovn-nbctl --wait=hv destroy Port_Group pg1]
 )
 
-OVN_CONTROLLER_EXPECT_HIT(
+OVN_CONTROLLER_EXPECT_NO_HIT(
     [hv1 hv2], [lflow_run],
     [ovn-nbctl --wait=hv ls-del ls1]
 )
@@ -672,6 +672,14 @@ OVN_CONTROLLER_EXPECT_NO_HIT(
     [ovn-nbctl --wait=hv lr-del lr1]
 )
 
-OVN_CLEANUP([hv1], [hv2])
+# Datapath "public" was only reachable through lr1, it stays local until the
+# next recompute.
+OVN_CLEANUP([hv1
+ln-public
+public-lr1
+ignored_dp=public], [hv2
+ln-public
+public-lr1
+ignored_dp=public])
 
 AT_CLEANUP

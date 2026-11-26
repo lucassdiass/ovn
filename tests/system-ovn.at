@@ -17810,7 +17810,9 @@ dnl Removing the last router must clean up the routes and the VRF device.
 check ovn-nbctl --wait=hv lr-del lr1
 OVS_WAIT_WHILE([ip link show dev ovnvrf1337])
 
-OVN_CLEANUP_CONTROLLER([hv1])
+dnl ls1 and ls2 were only reachable through the deleted routers, they stay
+dnl local until the next recompute.
+OVN_CLEANUP_CONTROLLER([hv1], [], [], [ls1,ls2])
 
 OVN_CLEANUP_NORTHD
 

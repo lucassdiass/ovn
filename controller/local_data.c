@@ -135,6 +135,32 @@ local_datapath_destroy(struct local_datapath *ld)
     free(ld);
 }
 
+/* Removes 'ld' from 'local_datapaths' and destroys it.  The peer port
+ * references that other local datapaths hold towards 'ld' are removed as
+ * well.  If 'tracked_datapaths' is nonnull, the datapath is tracked as
+ * removed.
+ *
+ * Other local datapaths that were only reachable through 'ld' are kept,
+ * they get cleaned up on the next full recompute. */
+void
+remove_local_datapath(struct hmap *local_datapaths,
+                      struct local_datapath *ld,
+                      struct hmap *tracked_datapaths)
+{
+    while (!vector_is_empty(&ld->peer_ports)) {
+        const struct peer_ports *peers = vector_get_ptr(&ld->peer_ports, 0);
+        remove_local_datapath_peer_port(peers->local, ld, local_datapaths);
+    }
+
+    if (tracked_datapaths) {
+        tracked_datapath_add(ld->datapath, TRACKED_RESOURCE_REMOVED,
+                             tracked_datapaths);
+    }
+
+    hmap_remove(local_datapaths, &ld->hmap_node);
+    local_datapath_destroy(ld);
+}
+
 /* Checks if pb is running on local gw router or pb and peer
  * are patch ports and if the peer's datapath should be added to
  * local datapaths or not.

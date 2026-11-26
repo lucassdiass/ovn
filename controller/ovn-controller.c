@@ -2011,22 +2011,37 @@ runtime_data_sb_port_binding_handler(struct engine_node *node, void *data)
 }
 
 static enum engine_input_handler_result
-runtime_data_sb_datapath_binding_handler(struct engine_node *node OVS_UNUSED,
-                                         void *data OVS_UNUSED)
+runtime_data_sb_datapath_binding_handler(struct engine_node *node,
+                                         void *data)
 {
     struct sbrec_datapath_binding_table *dp_table =
         (struct sbrec_datapath_binding_table *)EN_OVSDB_GET(
             engine_get_input("SB_datapath_binding", node));
     const struct sbrec_datapath_binding *dp;
     struct ed_type_runtime_data *rt_data = data;
+    enum engine_input_handler_result result = EN_HANDLED_UNCHANGED;
 
+    /* Validate all the changes first so that the runtime data isn't
+     * partially updated when falling back to a full recompute. */
     SBREC_DATAPATH_BINDING_TABLE_FOR_EACH_TRACKED (dp, dp_table) {
         if (sbrec_datapath_binding_is_deleted(dp)) {
-            if (get_local_datapath(&rt_data->local_datapaths,
-                                   dp->tunnel_key)) {
+            struct local_datapath *ld =
+                get_local_datapath(&rt_data->local_datapaths,
+                                   dp->tunnel_key);
+            if (ld && ld->datapath != dp) {
+                /* The tunnel key is reused by a different local datapath
+                 * within the same transaction. */
                 return EN_UNHANDLED;
             }
-
+            if (!ld && sbrec_datapath_binding_is_updated(
+                           dp, SBREC_DATAPATH_BINDING_COL_TUNNEL_KEY) &&
+                get_local_datapath_no_hash(&rt_data->local_datapaths,
+                                           dp->tunnel_key)) {
+                /* The tunnel key got updated before the deletion, the local
+                 * datapath is still hashed with the old one. */
+                return EN_UNHANDLED;
+            }
+            continue;
         }
 
         if (sbrec_datapath_binding_is_updated(
@@ -2043,7 +2058,27 @@ runtime_data_sb_datapath_binding_handler(struct engine_node *node OVS_UNUSED,
         }
     }
 
-    return EN_HANDLED_UNCHANGED;
+    /* The Port_Bindings of a deleted datapath are deleted in the same
+     * transaction (strong reference) and are handled afterwards by the
+     * SB_port_binding handler, as ports of a non-local datapath. */
+    SBREC_DATAPATH_BINDING_TABLE_FOR_EACH_TRACKED (dp, dp_table) {
+        if (!sbrec_datapath_binding_is_deleted(dp)) {
+            continue;
+        }
+
+        struct local_datapath *ld =
+            get_local_datapath(&rt_data->local_datapaths, dp->tunnel_key);
+        if (!ld) {
+            continue;
+        }
+
+        rt_data->tracked = true;
+        remove_local_datapath(&rt_data->local_datapaths, ld,
+                              &rt_data->tracked_dp_bindings);
+        result = EN_HANDLED_UPDATED;
+    }
+
+    return result;
 }
 
 struct ed_type_datapaths_updated {
@@ -2122,6 +2157,10 @@ datapaths_updated_runtime_data_handler(struct engine_node *node,
         if (tdp->tracked_type == TRACKED_RESOURCE_NEW) {
             uuidset_insert(&dp_data->waiting_sb_cond_update,
                            &tdp->dp->header_.uuid);
+            status = EN_HANDLED_UPDATED;
+        } else if (tdp->tracked_type == TRACKED_RESOURCE_REMOVED &&
+                   uuidset_find_and_delete(&dp_data->waiting_sb_cond_update,
+                                           &tdp->dp->header_.uuid)) {
             status = EN_HANDLED_UPDATED;
         }
     }
@@ -2860,9 +2899,30 @@ ct_zones_runtime_data_handler(struct engine_node *node, void *data)
             return EN_UNHANDLED;
         }
 
+        if (tdp->tracked_type == TRACKED_RESOURCE_REMOVED) {
+            updated |= ct_zone_handle_dp_removed(&ct_zones_data->ctx,
+                                                 tdp->dp);
+        }
+
         struct shash_node *shash_node;
         SHASH_FOR_EACH (shash_node, &tdp->lports) {
             struct tracked_lport *t_lport = shash_node->data;
+            if (!strcmp(t_lport->pb->type, "chassisredirect")
+                || !strcmp(t_lport->pb->type, "l2gateway")
+                || !strcmp(t_lport->pb->type, "external")) {
+                /* A full recompute allocates zones for these lports when
+                 * they are bound to this chassis (part of local_lports).
+                 * Release the zone once they are not anymore, e.g. when
+                 * they got deleted. */
+                if (!simap_contains(&rt_data->local_lports,
+                                    t_lport->pb->logical_port)) {
+                    updated |= ct_zone_handle_port_update(
+                        &ct_zones_data->ctx, t_lport->pb, false,
+                        &scan_start, min_ct_zone, max_ct_zone);
+                }
+                continue;
+            }
+
             if (strcmp(t_lport->pb->type, "")
                 && strcmp(t_lport->pb->type, "localport")
                 && strcmp(t_lport->pb->type, "l3gateway")
@@ -5247,12 +5307,18 @@ pflow_output_runtime_data_handler(struct engine_node *node, void *data)
 
     struct tracked_datapath *tdp;
     HMAP_FOR_EACH (tdp, node, tracked_dp_bindings) {
-        if (tdp->tracked_type != TRACKED_RESOURCE_UPDATED) {
+        if (tdp->tracked_type == TRACKED_RESOURCE_NEW) {
             /* Fall back to full recompute when a local datapath
-             * is added or deleted. */
+             * is added. */
             destroy_physical_ctx(&p_ctx);
             return EN_UNHANDLED;
         }
+
+        /* A removed local datapath is always deleted from the SB together
+         * with its port bindings and multicast groups, and the physical
+         * flows of those are removed by the SB_port_binding and
+         * SB_multicast_group handlers.  Only its tracked lports need to be
+         * handled here. */
 
         struct shash_node *shash_node;
         SHASH_FOR_EACH (shash_node, &tdp->lports) {
@@ -6572,22 +6638,20 @@ garp_rarp_runtime_data_handler(struct engine_node *node, void *data OVS_UNUSED)
 
     struct tracked_datapath *tdp;
     HMAP_FOR_EACH (tdp, node, &rt_data->tracked_dp_bindings) {
-        if (tdp->tracked_type == TRACKED_RESOURCE_REMOVED) {
-            /* This is currently not handled incrementally in runtime_data
-             * so it should never happen. Recompute just in case. */
-            return EN_UNHANDLED;
-        }
+        /* A removed local datapath doesn't exist anymore, but its localnet
+         * port (if any) is deleted together with it and tracked below. */
+        if (tdp->tracked_type != TRACKED_RESOURCE_REMOVED) {
+            struct local_datapath *ld = get_local_datapath(
+                &rt_data->local_datapaths, tdp->dp->tunnel_key);
 
-        struct local_datapath *ld = get_local_datapath(
-            &rt_data->local_datapaths, tdp->dp->tunnel_key);
+            if (!ld) {
+                continue;
+            }
 
-        if (!ld) {
-            continue;
-        }
-
-        if (ld->localnet_port) {
-            /* XXX: actually handle this incrementally. */
-            return EN_UNHANDLED;
+            if (ld->localnet_port) {
+                /* XXX: actually handle this incrementally. */
+                return EN_UNHANDLED;
+            }
         }
 
         /* The localnet port might also have been removed. */
@@ -6770,6 +6834,17 @@ neighbor_runtime_data_handler(struct engine_node *node, void *data)
 
     struct tracked_datapath *tdp;
     HMAP_FOR_EACH (tdp, node, &rt_data->tracked_dp_bindings) {
+        if (tdp->tracked_type == TRACKED_RESOURCE_REMOVED) {
+            /* The local datapath doesn't exist anymore. */
+            int64_t vni = ovn_smap_get_llong(&tdp->dp->external_ids,
+                                             "dynamic-routing-vni", -1);
+            if (ovn_is_valid_vni(vni) &&
+                !strcmp(datapath_get_nb_type(tdp->dp), "logical-switch")) {
+                return EN_UNHANDLED;
+            }
+            continue;
+        }
+
         struct local_datapath *ld =
             get_local_datapath(&rt_data->local_datapaths, tdp->dp->tunnel_key);
         if (!ld || !ld->is_switch) {

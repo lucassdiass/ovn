@@ -404,6 +404,27 @@ ct_zone_handle_dp_update(struct ct_zone_ctx *ctx,
     return true;
 }
 
+/* Releases the DNAT and SNAT zones of a datapath that is no longer local.
+ * Returns "true" if there was an update to the context. */
+bool
+ct_zone_handle_dp_removed(struct ct_zone_ctx *ctx,
+                          const struct sbrec_datapath_binding *dp)
+{
+    const char *name = smap_get(&dp->external_ids, "name");
+    if (!name) {
+        return false;
+    }
+
+    char *dnat = alloc_nat_zone_key(name, "dnat");
+    char *snat = alloc_nat_zone_key(name, "snat");
+    bool updated = ct_zone_remove(ctx, dnat);
+    updated |= ct_zone_remove(ctx, snat);
+    free(dnat);
+    free(snat);
+
+    return updated;
+}
+
 /* Returns "true" if there was an update to the context. */
 bool
 ct_zone_handle_port_update(struct ct_zone_ctx *ctx,
